@@ -1,0 +1,94 @@
+# Builds the release APK and uploads it as an artifact (and a GitHub
+# Release when a v* tag is pushed).
+#
+# Optional repository secrets (Settings → Secrets and variables → Actions):
+#   ANDROID_KEYSTORE_BASE64    base64 of locmate-release.jks
+#                              (base64 -w0 ~/locmate-release.jks)
+#   ANDROID_KEYSTORE_PASSWORD  the store/key password (from android/key.properties)
+#   ANDROID_KEY_ALIAS          key alias, e.g. locmate
+#   GOOGLE_MAPS_API_KEY        Android Maps SDK key (blank map without it)
+#
+# Without the keystore secrets the APK is signed with the debug key
+# (same fallback as locally), so the workflow still succeeds.
+
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # JDK 17 + Gradle dependency/download cache. This is the biggest
+      # speedup: Gradle re-downloads nothing between builds.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.50.0
+          channel: stable
+          cache: true
+
+      # Restore the Gradle build cache (compiled outputs) between runs.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/build-cache-*
+            ~/.gradle/caches/transforms-*
+          key: gradle-build-${{ runner.os }}-${{ github.sha }}
+          restore-keys: gradle-build-${{ runner.os }}-
+
+      - name: Extract release signing from secrets
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          base64 -d "$ANDROID_KEYSTORE_BASE64" > "$RUNNER_TEMP/release.jks"
+          cat > android/key.properties <<EOF
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyPassword=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          storeFile=$RUNNER_TEMP/release.jks
+          EOF
+
+      - name: Build release APK
+        env:
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        run: |
+          flutter pub get
+          flutter build apk --release
+
+      - name: Summarize
+        run: |
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          echo "| file | size | sha256 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| app-release.apk | $(du -h "$APK" | cut -f1) | \`sha256sum "$APK" | cut -d' ' -f1\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/app/outputs/flutter-apk/app-release.apk
