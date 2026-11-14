@@ -9,6 +9,7 @@ import '../theme.dart';
 import '../utils.dart';
 import '../widgets/common.dart';
 import '../widgets/member_avatar.dart';
+import 'change_password_screen.dart';
 import 'legal_screen.dart';
 import 'subscription_screen.dart';
 
@@ -198,11 +199,17 @@ class SettingsScreen extends StatelessWidget {
                   _SettingsGroup(
                     children: [
                       _ActionTile(
-                        icon: Icons.workspace_premium_rounded,
-                        title: state.circlePremium
+                        icon: state.trialActive
+                            ? Icons.hourglass_bottom_rounded
+                            : Icons.workspace_premium_rounded,
+                        title: state.trialActive
+                            ? 'Premium trial'
+                            : state.circlePremium
                             ? 'Locmate Premium'
                             : 'Upgrade to Premium',
-                        subtitle: state.circlePremium
+                        subtitle: state.trialActive
+                            ? '${state.trialDaysLeft} days left · Upgrade to keep Premium'
+                            : state.circlePremium
                             ? 'Active for ${state.circleName}'
                             : 'Unlimited members, places and low-battery alerts',
                         onTap: () => _openPremium(context),
@@ -293,18 +300,14 @@ class SettingsScreen extends StatelessWidget {
                       ),
                     ],
                   ),
-                  const SectionLabel('About'),
+                  const SectionLabel('Account'),
                   _SettingsGroup(
                     children: [
-                      const _InfoTile(
-                        icon: Icons.info_outline_rounded,
-                        title: 'Locmate version',
-                        trailing: '1.0.0',
-                      ),
-                      const _InfoTile(
-                        icon: Icons.map_outlined,
-                        title: 'Map data',
-                        trailing: 'OpenStreetMap contributors',
+                      _ActionTile(
+                        icon: Icons.password_rounded,
+                        title: 'Change password',
+                        subtitle: 'Update the password you use to sign in',
+                        onTap: () => _openChangePassword(context),
                       ),
                       _ActionTile(
                         icon: Icons.logout_rounded,
@@ -325,6 +328,21 @@ class SettingsScreen extends StatelessWidget {
                         subtitle: 'Permanently delete your account and data',
                         onTap: () => _confirmDeleteAccount(context, state),
                         danger: true,
+                      ),
+                    ],
+                  ),
+                  const SectionLabel('About'),
+                  _SettingsGroup(
+                    children: const [
+                      _InfoTile(
+                        icon: Icons.info_outline_rounded,
+                        title: 'Locmate version',
+                        trailing: '1.0.0',
+                      ),
+                      _InfoTile(
+                        icon: Icons.map_outlined,
+                        title: 'Map data',
+                        trailing: 'OpenStreetMap contributors',
                       ),
                     ],
                   ),
@@ -373,6 +391,14 @@ class SettingsScreen extends StatelessWidget {
     Navigator.of(
       context,
     ).push(MaterialPageRoute<void>(builder: (_) => const SubscriptionScreen()));
+  }
+
+  void _openChangePassword(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => const ChangePasswordScreen(forced: false),
+      ),
+    );
   }
 
   void _openLegal(BuildContext context, LegalDocument document) {

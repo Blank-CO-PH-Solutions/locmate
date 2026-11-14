@@ -10,7 +10,11 @@ import '../widgets/common.dart';
 import 'legal_screen.dart';
 
 class AuthScreen extends StatefulWidget {
-  const AuthScreen({super.key});
+  const AuthScreen({super.key, this.googleProviderCheck});
+
+  /// Checks whether Google sign-in is enabled in Supabase. Defaults to
+  /// [AppState.isGoogleProviderEnabled]; tests can pass a stub.
+  final Future<bool?> Function()? googleProviderCheck;
 
   @override
   State<AuthScreen> createState() => _AuthScreenState();
@@ -35,6 +39,9 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _obscurePassword = true;
   String? _error;
 
+  /// null while unknown or when the check failed; false hides the button.
+  bool? _googleEnabled;
+
   late final TapGestureRecognizer _termsRecognizer;
   late final TapGestureRecognizer _privacyRecognizer;
 
@@ -45,6 +52,13 @@ class _AuthScreenState extends State<AuthScreen> {
       ..onTap = () => _openLegal(LegalDocument.terms);
     _privacyRecognizer = TapGestureRecognizer()
       ..onTap = () => _openLegal(LegalDocument.privacy);
+    if (googleSignInSupported) _checkGoogleProvider();
+  }
+
+  Future<void> _checkGoogleProvider() async {
+    final check = widget.googleProviderCheck ?? AppState.isGoogleProviderEnabled;
+    final enabled = await check();
+    if (mounted) setState(() => _googleEnabled = enabled);
   }
 
   @override
@@ -121,6 +135,13 @@ class _AuthScreenState extends State<AuthScreen> {
         setState(
           () => _error = 'Could not open the browser for Google sign-in.',
         );
+      }
+    } on GoogleSignInUnavailable catch (error) {
+      if (mounted) {
+        setState(() {
+          _googleEnabled = false;
+          _error = error.toString();
+        });
       }
     } catch (error) {
       if (mounted) setState(() => _error = friendlyError(error));
@@ -334,7 +355,7 @@ class _AuthScreenState extends State<AuthScreen> {
                                 _creatingAccount ? 'Create account' : 'Sign in',
                               ),
                       ),
-                      if (googleSignInSupported) ...[
+                      if (googleSignInSupported && _googleEnabled != false) ...[
                         const SizedBox(height: 14),
                         Row(
                           children: [

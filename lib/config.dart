@@ -60,6 +60,10 @@ class PlanLimits {
 
   static const int freeMembers = 5;
   static const int freePlaces = 2;
+
+  /// New accounts get Premium for this many days (enforced in Supabase by
+  /// `start_profile_trial`).
+  static const int trialDays = 7;
 }
 
 /// Company and legal details shown in the app and in `assets/legal/`.

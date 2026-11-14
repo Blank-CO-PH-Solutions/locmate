@@ -5,11 +5,7 @@ import '../theme.dart';
 import '../utils.dart';
 
 class BatteryBadge extends StatelessWidget {
-  const BatteryBadge({
-    super.key,
-    required this.level,
-    this.dense = false,
-  });
+  const BatteryBadge({super.key, required this.level, this.dense = false});
 
   final double? level;
   final bool dense;
@@ -44,9 +40,7 @@ class BatteryBadge extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
-            value == null
-                ? Icons.battery_unknown_rounded
-                : batteryIcon(value),
+            value == null ? Icons.battery_unknown_rounded : batteryIcon(value),
             size: dense ? 11 : 14,
             color: color,
           ),

@@ -3,11 +3,7 @@ import 'package:material_ui/material_ui.dart';
 import '../theme.dart';
 
 class LocmateLogo extends StatelessWidget {
-  const LocmateLogo({
-    super.key,
-    this.size = 42,
-    this.showShadow = true,
-  });
+  const LocmateLogo({super.key, this.size = 42, this.showShadow = true});
 
   final double size;
   final bool showShadow;
@@ -44,11 +40,7 @@ class LocmateLogo extends StatelessWidget {
 }
 
 class ErrorBanner extends StatelessWidget {
-  const ErrorBanner({
-    super.key,
-    required this.message,
-    this.onDismiss,
-  });
+  const ErrorBanner({super.key, required this.message, this.onDismiss});
 
   final String message;
   final VoidCallback? onDismiss;
@@ -60,9 +52,7 @@ class ErrorBanner extends StatelessWidget {
       decoration: BoxDecoration(
         color: LocmateColors.danger.withValues(alpha: 0.09),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: LocmateColors.danger.withValues(alpha: 0.24),
-        ),
+        border: Border.all(color: LocmateColors.danger.withValues(alpha: 0.24)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -184,7 +174,9 @@ class SurfaceCard extends StatelessWidget {
       color: color ?? scheme.surface,
       borderRadius: BorderRadius.circular(radius),
       border: Border.all(
-        color: borderColor ?? (isDark ? const Color(0xFF2A2536) : LocmateColors.line),
+        color:
+            borderColor ??
+            (isDark ? const Color(0xFF2A2536) : LocmateColors.line),
       ),
       boxShadow: isDark
           ? const []
@@ -198,11 +190,7 @@ class SurfaceCard extends StatelessWidget {
     );
 
     if (onTap == null) {
-      return Container(
-        padding: padding,
-        decoration: decoration,
-        child: child,
-      );
+      return Container(padding: padding, decoration: decoration, child: child);
     }
 
     return Container(
@@ -287,10 +275,7 @@ class EmptyState extends StatelessWidget {
             Text(
               message!,
               textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 12.5,
-                color: scheme.onSurfaceVariant,
-              ),
+              style: TextStyle(fontSize: 12.5, color: scheme.onSurfaceVariant),
             ),
           ],
         ],

@@ -1,0 +1,19 @@
+{
+  "name": "locmate-landing",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Locmate marketing site, Android download and PayMongo Premium checkout.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check lib/config.js && node --check lib/paymongo.js && node --check lib/supabase.js && node --check lib/legal.js && node --check lib/pages.js && node --check lib/ui.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "marked": "^15.0.7"
+  }
+}

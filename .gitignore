@@ -53,3 +53,9 @@ supabase/.env
 
 # Android build output
 /android/build/
+
+# Landing page
+landing/node_modules/
+
+# Chat session exports
+2026-*-*.txt

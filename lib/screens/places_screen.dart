@@ -13,12 +13,85 @@ import '../widgets/member_avatar.dart';
 import 'subscription_screen.dart';
 
 class PlacesScreen extends StatelessWidget {
-  const PlacesScreen({super.key});
+  const PlacesScreen({super.key, this.embedded = false});
+
+  /// When true, renders only the places content (no Scaffold or header) so it
+  /// can sit inside the Circle screen.
+  final bool embedded;
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final scheme = Theme.of(context).colorScheme;
+
+    final content = Padding(
+      padding: EdgeInsets.symmetric(horizontal: embedded ? 0 : 20),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: scheme.primary.withValues(alpha: 0.07),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.notifications_active_outlined,
+                  size: 18,
+                  color: scheme.primary,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Everyone in ${state.circleName} gets an alert '
+                    'when a member comes or goes.',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      height: 1.35,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (!state.circlePremium) ...[
+            const SizedBox(height: 10),
+            _FreePlanNotice(state: state),
+          ],
+          const SizedBox(height: 14),
+          if (state.places.isEmpty)
+            SurfaceCard(
+              onTap: () => _showAddPlace(context),
+              child: const EmptyState(
+                icon: Icons.place_rounded,
+                title: 'No places yet',
+                message:
+                    'Add Home, School or Work to get arrival and '
+                    'departure alerts.',
+              ),
+            )
+          else
+            for (final place in state.places)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _PlaceCard(
+                  place: place,
+                  members: state.membersAtPlace(place),
+                  onRemove: () => _confirmRemove(context, place),
+                ),
+              ),
+          const SizedBox(height: 4),
+          _AddPlaceTile(
+            onTap: () => _showAddPlace(context),
+            locked: !state.canAddPlace,
+          ),
+        ],
+      ),
+    );
+
+    if (embedded) return content;
 
     return Scaffold(
       body: SafeArea(
@@ -36,72 +109,7 @@ class PlacesScreen extends StatelessWidget {
                 ),
               ],
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Column(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: scheme.primary.withValues(alpha: 0.07),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.notifications_active_outlined,
-                          size: 18,
-                          color: scheme.primary,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            'Everyone in ${state.circleName} gets an alert '
-                            'when a member comes or goes.',
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              height: 1.35,
-                              color: scheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (!state.circlePremium) ...[
-                    const SizedBox(height: 10),
-                    _FreePlanNotice(state: state),
-                  ],
-                  const SizedBox(height: 14),
-                  if (state.places.isEmpty)
-                    SurfaceCard(
-                      onTap: () => _showAddPlace(context),
-                      child: const EmptyState(
-                        icon: Icons.place_rounded,
-                        title: 'No places yet',
-                        message:
-                            'Add Home, School or Work to get arrival and '
-                            'departure alerts.',
-                      ),
-                    )
-                  else
-                    for (final place in state.places)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: _PlaceCard(
-                          place: place,
-                          members: state.membersAtPlace(place),
-                          onRemove: () => _confirmRemove(context, place),
-                        ),
-                      ),
-                  const SizedBox(height: 4),
-                  _AddPlaceTile(
-                    onTap: () => _showAddPlace(context),
-                    locked: !state.canAddPlace,
-                  ),
-                ],
-              ),
-            ),
+            content,
           ],
         ),
       ),

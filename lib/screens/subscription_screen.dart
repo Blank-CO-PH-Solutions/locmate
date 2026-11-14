@@ -170,7 +170,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     final state = context.watch<AppState>();
     final scheme = Theme.of(context).colorScheme;
     final owner = state.memberById(state.circle?.ownerId);
-    final canUpgrade = state.isOwner && !state.circlePremium;
+    final trial = state.trialActive;
+    final canUpgrade = state.isOwner && (!state.circlePremium || trial);
     final active = state.circlePremium;
 
     return Scaffold(
@@ -181,7 +182,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(20, 4, 20, 36),
             children: [
-              _PremiumHero(active: active),
+              _PremiumHero(
+                active: active,
+                trialDaysLeft: trial ? state.trialDaysLeft : null,
+              ),
               const SizedBox(height: 16),
               SurfaceCard(
                 padding: const EdgeInsets.all(14),
@@ -202,7 +206,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: Icon(
-                        active
+                        trial
+                            ? Icons.hourglass_bottom_rounded
+                            : active
                             ? Icons.verified_rounded
                             : Icons.people_outline_rounded,
                         size: 21,
@@ -215,7 +221,11 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            active ? 'Premium is active' : 'Free plan',
+                            trial
+                                ? 'Premium trial active'
+                                : active
+                                ? 'Premium is active'
+                                : 'Free plan',
                             style: const TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w800,
@@ -223,7 +233,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            active
+                            trial
+                                ? '${state.trialDaysLeft} days left. Upgrade '
+                                      'any time to keep unlimited members and places.'
+                                : active
                                 ? 'Your circle has unlimited members and places.'
                                 : 'Up to ${PlanLimits.freeMembers} members and '
                                       '${PlanLimits.freePlaces} places per circle.',
@@ -239,7 +252,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                   ],
                 ),
               ),
-              if (active && _service.isSupported)
+              if (active && !trial && _service.isSupported)
                 Padding(
                   padding: const EdgeInsets.only(top: 10),
                   child: OutlinedButton.icon(
@@ -458,9 +471,12 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 }
 
 class _PremiumHero extends StatelessWidget {
-  const _PremiumHero({required this.active});
+  const _PremiumHero({required this.active, this.trialDaysLeft});
 
   final bool active;
+  final int? trialDaysLeft;
+
+  bool get _trial => trialDaysLeft != null;
 
   @override
   Widget build(BuildContext context) {
@@ -493,7 +509,9 @@ class _PremiumHero extends StatelessWidget {
                   borderRadius: BorderRadius.circular(15),
                 ),
                 child: Icon(
-                  active
+                  _trial
+                      ? Icons.hourglass_bottom_rounded
+                      : active
                       ? Icons.verified_rounded
                       : Icons.workspace_premium_rounded,
                   color: Colors.white,
@@ -503,7 +521,11 @@ class _PremiumHero extends StatelessWidget {
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
-                  active ? 'You’re Premium' : 'Locmate Premium',
+                  _trial
+                      ? 'Your Premium trial'
+                      : active
+                      ? 'You’re Premium'
+                      : 'Locmate Premium',
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 22,
@@ -516,7 +538,11 @@ class _PremiumHero extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Text(
-            active
+            _trial
+                ? 'You have $trialDaysLeft days of unlimited members, places '
+                      'and low-battery alerts. Upgrade before it ends to keep '
+                      'them.'
+                : active
                 ? 'Thank you for keeping your circle connected. Your plan is '
                       'active on every device where you sign in.'
                 : 'More room for your circle, more places on the map, and '

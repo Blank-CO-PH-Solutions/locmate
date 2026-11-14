@@ -5,6 +5,7 @@ import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart' hide Circle;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -45,6 +46,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     this.darkMode = false,
     this.mapDark = false,
     this.circlePremium = false,
+    this.trialActive = false,
+    this.trialEndsAt,
+    this.trialDaysLeft = 0,
+    this.mustChangePassword = false,
   }) : _client = SupabaseClient(
          SupabaseConfig.url,
          SupabaseConfig.publishableKey,
@@ -65,6 +70,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   static const String _settingsKey = 'locmate.settings.v2';
   static const String _lastLocationKey = 'locmate.last_location.v1';
   static const Duration _publishInterval = Duration(seconds: 15);
+
+  /// How often the circle is re-synced and the current location re-published
+  /// even when nothing moved, so every member's state is under a minute old.
+  static const Duration heartbeatInterval = Duration(seconds: 30);
   static const double _publishDistanceMeters = 25;
 
   final SupabaseClient _client;
@@ -75,6 +84,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription<AuthState>? _authSub;
   StreamSubscription<Position>? _positionSub;
   RealtimeChannel? _channel;
+  Timer? _heartbeat;
+  bool _heartbeatRunning = false;
+  final StreamController<AppNotice> _notices =
+      StreamController<AppNotice>.broadcast();
   Future<void>? _sessionFuture;
   int _authGeneration = 0;
   bool _disposed = false;
@@ -114,6 +127,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   bool circlePremium = false;
   bool userPremium = false;
 
+  /// New accounts get a 7-day Premium trial. `trialActive` is only true while
+  /// there is no paid subscription or internal-tester access.
+  bool trialActive = false;
+  DateTime? trialEndsAt;
+  int trialDaysLeft = 0;
+
+  /// True when the account still uses a temporary password. The app blocks the
+  /// rest of the UI until the user chooses a new one.
+  bool mustChangePassword = false;
+
   int? get memberLimit => circlePremium ? null : PlanLimits.freeMembers;
   int? get placeLimit => circlePremium ? null : PlanLimits.freePlaces;
   bool get canAddPlace => placeLimit == null || _places.length < placeLimit!;
@@ -130,6 +153,15 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<Member> get members => List.unmodifiable(_members);
   List<Place> get places => List.unmodifiable(_places);
   List<ChatMessage> get messages => List.unmodifiable(_messages);
+
+  /// In-app notifications (new alerts and chat messages from other members).
+  /// The UI shows these as a toast and vibrates the phone.
+  Stream<AppNotice> get notices => _notices.stream;
+
+  /// Emits a notice. Public so the UI and tests can trigger one directly.
+  void notify(AppNotice notice) {
+    if (!_notices.isClosed) _notices.add(notice);
+  }
 
   List<AlertEvent> get alerts {
     final copy = [..._alerts];
@@ -285,6 +317,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
 
+    // Accounts created with a temporary password must choose a new one before
+    // they can use the app. The flag lives in the auth user's metadata so it
+    // survives sign-out and works on every platform.
+    mustChangePassword = user.userMetadata?['must_change_password'] == true;
+
     phase = AppPhase.loading;
     startupError = null;
     notifyListeners();
@@ -347,7 +384,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _subscribeRealtime();
       phase = AppPhase.ready;
       notifyListeners();
-      unawaited(_startLocationUpdates());
+      if (!mustChangePassword) unawaited(_startLocationUpdates());
     } catch (error) {
       if (generation != _authGeneration) return;
       startupError = friendlyError(error);
@@ -407,6 +444,21 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _handleSignedOut();
   }
 
+  /// Replaces the current account password and clears the temporary-password
+  /// flag. Supabase stores the flag in the user's metadata, so it is removed
+  /// here in the same request.
+  Future<void> changePassword(String newPassword) async {
+    await _client.auth.updateUser(
+      UserAttributes(
+        password: newPassword,
+        data: {'must_change_password': false},
+      ),
+    );
+    mustChangePassword = false;
+    notifyListeners();
+    if (phase == AppPhase.ready) unawaited(_startLocationUpdates());
+  }
+
   /// Permanently deletes the account and its data (Settings → Delete account).
   Future<void> deleteAccount() async {
     await _client.rpc('delete_account');
@@ -431,6 +483,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       );
       circlePremium = plan['circle_premium'] as bool? ?? false;
       userPremium = plan['user_premium'] as bool? ?? false;
+      trialActive = plan['trial_active'] as bool? ?? false;
+      trialDaysLeft = (plan['trial_days_left'] as num?)?.toInt() ?? 0;
+      final trialEnds = plan['trial_ends_at'];
+      trialEndsAt = trialEnds is String
+          ? DateTime.tryParse(trialEnds)?.toLocal()
+          : null;
     } catch (_) {
       // Keep the last known plan; the server still enforces limits.
     }
@@ -450,7 +508,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   /// Opens the system browser for Google sign-in. The session arrives through
   /// the [SupabaseConfig.authRedirectUrl] deep link and is picked up by the
   /// auth state listener. Returns false when the browser could not be opened.
-  Future<bool> signInWithGoogle() {
+  ///
+  /// Before opening the browser it checks that the Google provider is enabled
+  /// in Supabase. Otherwise the browser would only show the raw
+  /// "Unsupported provider: provider is not enabled" error.
+  Future<bool> signInWithGoogle() async {
+    if (await isGoogleProviderEnabled() == false) {
+      throw const GoogleSignInUnavailable();
+    }
     return _client.auth.signInWithOAuth(
       OAuthProvider.google,
       redirectTo: SupabaseConfig.authRedirectUrl,
@@ -459,12 +524,39 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     );
   }
 
+  /// Reads the public Supabase Auth settings to see whether Google sign-in is
+  /// turned on. Returns null when the check itself fails (offline, timeout) so
+  /// the caller can still try the normal flow.
+  static Future<bool?> isGoogleProviderEnabled({http.Client? client}) async {
+    final httpClient = client ?? http.Client();
+    try {
+      final response = await httpClient
+          .get(
+            Uri.parse('${SupabaseConfig.url}/auth/v1/settings'),
+            headers: {'apikey': SupabaseConfig.publishableKey},
+          )
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) return null;
+      final body = jsonDecode(response.body);
+      if (body is! Map) return null;
+      final external = body['external'];
+      if (external is! Map) return null;
+      return external['google'] == true;
+    } catch (_) {
+      return null;
+    } finally {
+      if (client == null) httpClient.close();
+    }
+  }
+
   void _handleSignedOut() {
     _authGeneration++;
     _positionSub?.cancel();
     _positionSub = null;
     _channel?.unsubscribe();
     _channel = null;
+    _heartbeat?.cancel();
+    _heartbeat = null;
     selectedMemberId = null;
     profile = null;
     circle = null;
@@ -475,6 +567,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _alerts = [];
     circlePremium = false;
     userPremium = false;
+    trialActive = false;
+    trialEndsAt = null;
+    trialDaysLeft = 0;
+    mustChangePassword = false;
     phase = AppPhase.signedOut;
     startupError = null;
     syncError = null;
@@ -524,6 +620,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _positionSub = null;
     _channel?.unsubscribe();
     _channel = null;
+    _heartbeat?.cancel();
+    _heartbeat = null;
     circle = null;
     _members = [];
     _places = [];
@@ -748,6 +846,33 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         )
         .subscribe();
     _channel = channel;
+    _heartbeat?.cancel();
+    _heartbeat = Timer.periodic(heartbeatInterval, (_) => _onHeartbeat());
+  }
+
+  /// Keeps the circle fresh when realtime events are missed and re-publishes
+  /// this device's location (with a new battery reading) while standing still,
+  /// because the position stream only fires after the device moves.
+  Future<void> _onHeartbeat() async {
+    if (_disposed || _heartbeatRunning) return;
+    if (phase != AppPhase.ready || circle == null) return;
+    _heartbeatRunning = true;
+    try {
+      final last = _lastPosition;
+      final stale =
+          _lastPublishAt == null ||
+          DateTime.now().difference(_lastPublishAt!) >= heartbeatInterval;
+      if (sharingEnabled && last != null && stale) {
+        await _publishLocation(last, force: true);
+      }
+      await _loadCircleData();
+      if (syncError != null) syncError = null;
+      notifyListeners();
+    } catch (_) {
+      // Transient; the next heartbeat or a manual refresh retries.
+    } finally {
+      _heartbeatRunning = false;
+    }
   }
 
   void _handleLocationChange(PostgresChangePayload payload) {
@@ -760,20 +885,42 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _handleMessageChange(PostgresChangePayload payload) {
-    _addMessage(ChatMessage.fromMap(payload.newRecord));
+    final message = ChatMessage.fromMap(payload.newRecord);
+    final isNew = !_messages.any((existing) => existing.id == message.id);
+    _addMessage(message);
     notifyListeners();
+    if (isNew && message.senderId != userId) {
+      final sender = memberById(message.senderId);
+      notify(
+        AppNotice(
+          title: sender?.name ?? 'New message',
+          body: message.text,
+          icon: Icons.chat_bubble_rounded,
+          color: sender?.color,
+        ),
+      );
+    }
   }
 
   void _handleAlertChange(PostgresChangePayload payload) {
     final record = payload.newRecord;
-    _addAlert(
-      AlertEvent.fromMap(
-        record,
-        memberName:
-            memberById(record['member_id'] as String?)?.name ?? 'Member',
-      ),
+    final alert = AlertEvent.fromMap(
+      record,
+      memberName: memberById(record['member_id'] as String?)?.name ?? 'Member',
     );
+    final isNew = !_alerts.any((existing) => existing.id == alert.id);
+    _addAlert(alert);
     notifyListeners();
+    if (isNew && alert.memberId != userId) {
+      notify(
+        AppNotice(
+          title: alert.title,
+          body: alert.body,
+          icon: alertIcon(alert.type),
+          urgent: alert.type == AlertType.sos,
+        ),
+      );
+    }
   }
 
   Future<void> _reloadPlaces() async {
@@ -817,7 +964,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         return AndroidSettings(
           accuracy: _accuracy,
           distanceFilter: _distanceFilter,
-          intervalDuration: Duration(seconds: batterySaver ? 60 : 15),
+          intervalDuration: Duration(seconds: batterySaver ? 30 : 10),
           foregroundNotificationConfig: const ForegroundNotificationConfig(
             notificationTitle: 'Locmate is sharing your location',
             notificationText:
@@ -1396,6 +1543,37 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _authSub?.cancel();
     _positionSub?.cancel();
     _channel?.unsubscribe();
+    _heartbeat?.cancel();
+    _notices.close();
     super.dispose();
   }
+}
+
+/// Thrown when Google sign-in is not enabled for the Supabase project.
+class GoogleSignInUnavailable implements Exception {
+  const GoogleSignInUnavailable();
+
+  @override
+  String toString() =>
+      'Google sign-in is not available yet. Use your email and password '
+      'for now.';
+}
+
+/// A short in-app notification shown as a toast.
+class AppNotice {
+  const AppNotice({
+    required this.title,
+    this.body = '',
+    this.icon = Icons.notifications_rounded,
+    this.color,
+    this.urgent = false,
+  });
+
+  final String title;
+  final String body;
+  final IconData icon;
+  final Color? color;
+
+  /// Urgent notices (SOS) vibrate longer and stay on screen longer.
+  final bool urgent;
 }

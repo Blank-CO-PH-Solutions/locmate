@@ -16,6 +16,20 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
+// Google Maps SDK key. Set GOOGLE_MAPS_API_KEY in android/local.properties
+// (gitignored) or export it in the environment. Leave empty until the key is
+// created; the map then shows Google's "this app is not authorized" notice.
+// See README.md → "Google Maps".
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localProperties.load(FileInputStream(localPropertiesFile))
+}
+val googleMapsApiKey: String =
+    localProperties["GOOGLE_MAPS_API_KEY"] as String?
+        ?: System.getenv("GOOGLE_MAPS_API_KEY")
+        ?: ""
+
 android {
     namespace = "com.locmate.locmate"
     compileSdk = flutter.compileSdkVersion
@@ -34,6 +48,7 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["GOOGLE_MAPS_API_KEY"] = googleMapsApiKey
     }
 
     signingConfigs {

@@ -1,12 +1,16 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart' hide Circle;
+import 'package:locmate/app.dart';
 import 'package:locmate/models/circle.dart';
 import 'package:locmate/models/member.dart';
 import 'package:locmate/models/profile.dart';
 import 'package:locmate/screens/auth_screen.dart';
+import 'package:locmate/screens/change_password_screen.dart';
 import 'package:locmate/screens/chat_screen.dart';
 import 'package:locmate/screens/circle_setup_screen.dart';
+import 'package:locmate/screens/home_shell.dart';
 import 'package:locmate/screens/legal_screen.dart';
+import 'package:locmate/screens/map_screen.dart';
 import 'package:locmate/screens/member_detail_screen.dart';
 import 'package:locmate/screens/places_screen.dart';
 import 'package:locmate/screens/safety_screen.dart';
@@ -36,7 +40,12 @@ Member _member({bool sharing = true}) => Member(
   lastUpdated: DateTime.now(),
 );
 
-AppState _readyState({bool sharing = true}) => AppState.preview(
+AppState _readyState({
+  bool sharing = true,
+  bool mustChangePassword = false,
+  bool trialActive = false,
+  int trialDaysLeft = 0,
+}) => AppState.preview(
   profile: const UserProfile(
     id: 'me',
     displayName: 'Jordan Lee',
@@ -49,6 +58,10 @@ AppState _readyState({bool sharing = true}) => AppState.preview(
     ownerId: 'me',
   ),
   members: [_member(sharing: sharing)],
+  mustChangePassword: mustChangePassword,
+  circlePremium: trialActive,
+  trialActive: trialActive,
+  trialDaysLeft: trialDaysLeft,
 );
 
 void main() {
@@ -101,6 +114,54 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Welcome back'), findsOneWidget);
       expect(find.text('Sign in'), findsWidgets);
+      expect(tester.takeException(), isNull);
+    } finally {
+      state.dispose();
+    }
+  });
+
+  testWidgets('temporary password blocks the app until changed', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final state = _readyState(mustChangePassword: true);
+    try {
+      await tester.pumpWidget(
+        ChangeNotifierProvider<AppState>.value(
+          value: state,
+          child: const LocmateApp(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Choose a new password'), findsOneWidget);
+      expect(find.text('Update password'), findsOneWidget);
+      expect(find.text('Privacy Policy'), findsNothing);
+      expect(tester.takeException(), isNull);
+    } finally {
+      state.dispose();
+    }
+  });
+
+  testWidgets('change password screen renders in optional mode', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final state = _readyState();
+    try {
+      await tester.pumpWidget(
+        _wrap(state, const ChangePasswordScreen(forced: false)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Change password'), findsOneWidget);
+      expect(find.text('Update password'), findsOneWidget);
       expect(tester.takeException(), isNull);
     } finally {
       state.dispose();
@@ -204,6 +265,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Upgrade to Premium'), findsOneWidget);
+      expect(find.text('Change password'), findsOneWidget);
       expect(find.text('Privacy Policy'), findsOneWidget);
       expect(find.text('Terms of Service'), findsOneWidget);
       expect(find.text('Delete account'), findsOneWidget);
@@ -256,6 +318,93 @@ void main() {
         find.text('Purchases are available in the mobile apps'),
         findsOneWidget,
       );
+      expect(tester.takeException(), isNull);
+    } finally {
+      state.dispose();
+    }
+  });
+
+  testWidgets('subscription screen shows the 7-day trial', (tester) async {
+    tester.view.physicalSize = const Size(390, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final state = _readyState(trialActive: true, trialDaysLeft: 5);
+    try {
+      await tester.pumpWidget(_wrap(state, const SubscriptionScreen()));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Your Premium trial'), findsOneWidget);
+      expect(find.text('Premium trial active'), findsOneWidget);
+      expect(find.textContaining('5 days left'), findsWidgets);
+      expect(find.text('Manage subscription'), findsNothing);
+      expect(tester.takeException(), isNull);
+    } finally {
+      state.dispose();
+    }
+  });
+
+  testWidgets('the map is the first screen after login', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final state = _readyState();
+    // Google Maps is a native platform view that cannot render in tests.
+    MapScreen.useGoogleMapsOverride = false;
+    addTearDown(() => MapScreen.useGoogleMapsOverride = null);
+    try {
+      await tester.pumpWidget(
+        ChangeNotifierProvider<AppState>.value(
+          value: state,
+          child: MaterialApp(
+            theme: buildLocmateTheme(Brightness.light),
+            home: const HomeShell(),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byType(MapScreen), findsOneWidget);
+      final navBar = tester.widget<NavigationBar>(find.byType(NavigationBar));
+      expect(navBar.selectedIndex, 0);
+      expect(find.text('Circle'), findsWidgets);
+    } finally {
+      state.dispose();
+    }
+  });
+
+  testWidgets('the circle panel minimizes to show the whole map', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final state = _readyState();
+    MapScreen.useGoogleMapsOverride = false;
+    addTearDown(() => MapScreen.useGoogleMapsOverride = null);
+    try {
+      await tester.pumpWidget(_wrap(state, const MapScreen()));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // Expanded: the member list is visible.
+      expect(find.byTooltip('Minimize panel'), findsOneWidget);
+      expect(find.textContaining('Jordan Lee'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Minimize panel'));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // Minimized: only the slim control bar remains, so the map is clear.
+      expect(find.byTooltip('Expand panel'), findsOneWidget);
+      expect(find.textContaining('Jordan Lee'), findsNothing);
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(find.byTooltip('Expand panel'));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byTooltip('Minimize panel'), findsOneWidget);
+      expect(find.textContaining('Jordan Lee'), findsOneWidget);
       expect(tester.takeException(), isNull);
     } finally {
       state.dispose();

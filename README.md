@@ -113,6 +113,16 @@ select public.remove_internal_tester('teammate@blankcoph.solutions');
 
 Internal access is stored in `public.internal_testers` and is checked by `public.is_premium()`, so the database enforces it just like a paid subscription. A circle is Premium when its **owner** is internal; external users and circles owned by them stay on the Free plan.
 
+Accounts created with `"must_change_password": true` in their user metadata are sent straight to the change-password screen after sign-in; the rest of the app stays blocked until they choose a new password. You can set the flag later in the Supabase SQL editor:
+
+```sql
+update auth.users
+set raw_user_meta_data = raw_user_meta_data || '{"must_change_password": true}'
+where email = 'teammate@blankcoph.solutions';
+```
+
+Users can change their password at any time from **Settings → Change password**.
+
 Once RevenueCat is configured, you can also comp access there: open the customer in RevenueCat, click **Grant** in the Entitlements card, and choose the `premium` entitlement and an end date. RevenueCat sends that to the webhook as a promotional `NON_RENEWING_PURCHASE`, so the app picks it up without a rebuild. Use one method or the other; `internal_testers` is the option that works before RevenueCat is set up.
 
 ## Desktop builds
