@@ -1,11 +1,16 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../theme.dart';
 
 class LocmateLogo extends StatelessWidget {
-  const LocmateLogo({super.key, this.size = 42});
+  const LocmateLogo({
+    super.key,
+    this.size = 42,
+    this.showShadow = true,
+  });
 
   final double size;
+  final bool showShadow;
 
   @override
   Widget build(BuildContext context) {
@@ -13,24 +18,87 @@ class LocmateLogo extends StatelessWidget {
       width: size,
       height: size,
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(size * 0.32),
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF7B5CF5), LocmateColors.primary],
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: LocmateColors.primary.withValues(alpha: 0.3),
-            blurRadius: 12,
-            offset: const Offset(0, 5),
-          ),
-        ],
+        borderRadius: BorderRadius.circular(size * 0.24),
+        boxShadow: showShadow
+            ? [
+                BoxShadow(
+                  color: LocmateColors.primary.withValues(alpha: 0.28),
+                  blurRadius: size * 0.3,
+                  offset: Offset(0, size * 0.1),
+                ),
+              ]
+            : null,
       ),
-      child: Icon(
-        Icons.location_on_rounded,
-        color: Colors.white,
-        size: size * 0.56,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(size * 0.24),
+        child: Image.asset(
+          'assets/images/locmate_logo.png',
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          filterQuality: FilterQuality.high,
+        ),
+      ),
+    );
+  }
+}
+
+class ErrorBanner extends StatelessWidget {
+  const ErrorBanner({
+    super.key,
+    required this.message,
+    this.onDismiss,
+  });
+
+  final String message;
+  final VoidCallback? onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
+      decoration: BoxDecoration(
+        color: LocmateColors.danger.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: LocmateColors.danger.withValues(alpha: 0.24),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 1),
+            child: Icon(
+              Icons.error_outline_rounded,
+              size: 18,
+              color: LocmateColors.danger,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                fontSize: 12,
+                height: 1.35,
+                color: LocmateColors.danger,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          if (onDismiss != null)
+            IconButton(
+              onPressed: onDismiss,
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Dismiss',
+              icon: const Icon(
+                Icons.close_rounded,
+                size: 16,
+                color: LocmateColors.danger,
+              ),
+            ),
+        ],
       ),
     );
   }

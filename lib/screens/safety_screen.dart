@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/alert_event.dart';
@@ -6,6 +7,7 @@ import '../state/app_state.dart';
 import '../theme.dart';
 import '../utils.dart';
 import '../widgets/common.dart';
+import 'subscription_screen.dart';
 
 class SafetyScreen extends StatelessWidget {
   const SafetyScreen({super.key});
@@ -70,12 +72,16 @@ class SafetyScreen extends StatelessWidget {
                 children: [
                   _SosCard(onSend: () => _confirmSos(context)),
                   const SizedBox(height: 10),
-                  _SafeBanner(
-                    lowBatteryCount: state.lowBatteryCount,
-                    memberCount: state.members.length,
-                  ),
+                  _SafeBanner(state: state),
+                  if (!state.circlePremium) ...[
+                    const SizedBox(height: 10),
+                    _PremiumNudge(onTap: () => _openPremium(context)),
+                  ],
                   const SizedBox(height: 10),
-                  const _DrivingReportCard(),
+                  _CircleStatusCard(
+                    state: state,
+                    onCopyInvite: () => _copyInvite(context),
+                  ),
                   const SectionLabel('Activity'),
                   if (activity.isEmpty)
                     const SurfaceCard(
@@ -90,9 +96,9 @@ class SafetyScreen extends StatelessWidget {
                     ...activity,
                   const SizedBox(height: 16),
                   Text(
-                    'Locmate is a demo experience. SOS alerts are broadcast '
-                    'to the circle inside the app only and do not contact '
-                    'emergency services.',
+                    'SOS alerts are shared with your circle inside Locmate. '
+                    'They do not contact emergency services. Call your local '
+                    'emergency number if you are in danger.',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 10,
@@ -109,6 +115,22 @@ class SafetyScreen extends StatelessWidget {
     );
   }
 
+  void _openPremium(BuildContext context) {
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const SubscriptionScreen()));
+  }
+
+  Future<void> _copyInvite(BuildContext context) async {
+    final code = context.read<AppState>().inviteCode;
+    if (code.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: code));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text('Invite code $code copied')));
+  }
+
   Future<void> _confirmSos(BuildContext context) async {
     final state = context.read<AppState>();
     final confirmed = await showDialog<bool>(
@@ -116,8 +138,8 @@ class SafetyScreen extends StatelessWidget {
       builder: (dialogContext) => AlertDialog(
         title: const Text('Send an SOS alert?'),
         content: Text(
-          'Everyone in ${AppState.circleName} will be notified and can see '
-          'your live location on the map.',
+          'Everyone in ${state.circleName} will be notified and can see '
+          'your latest shared location.',
         ),
         actions: [
           TextButton(
@@ -135,14 +157,21 @@ class SafetyScreen extends StatelessWidget {
       ),
     );
     if (confirmed != true || !context.mounted) return;
-    state.sendSos();
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        const SnackBar(
-          content: Text('SOS sent to everyone in your circle'),
-        ),
-      );
+
+    try {
+      await state.sendSos();
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('SOS sent to everyone in your circle')),
+        );
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(friendlyError(error))));
+    }
   }
 }
 
@@ -207,7 +236,7 @@ class _SosCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  'Alert everyone in your circle and share your live '
+                  'Alert everyone in your circle and share your latest '
                   'location instantly.',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.75),
@@ -261,21 +290,82 @@ class _SosCard extends StatelessWidget {
   }
 }
 
-class _SafeBanner extends StatelessWidget {
-  const _SafeBanner({
-    required this.lowBatteryCount,
-    required this.memberCount,
-  });
+class _PremiumNudge extends StatelessWidget {
+  const _PremiumNudge({required this.onTap});
 
-  final int lowBatteryCount;
-  final int memberCount;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return SurfaceCard(
+      onTap: onTap,
+      padding: const EdgeInsets.fromLTRB(12, 9, 8, 9),
+      color: scheme.primary.withValues(alpha: 0.06),
+      borderColor: scheme.primary.withValues(alpha: 0.16),
+      child: Row(
+        children: [
+          Icon(
+            Icons.workspace_premium_outlined,
+            size: 18,
+            color: scheme.primary,
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              'Low-battery alerts are included with Premium.',
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Icon(
+            Icons.chevron_right_rounded,
+            size: 19,
+            color: scheme.onSurfaceVariant,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SafeBanner extends StatelessWidget {
+  const _SafeBanner({required this.state});
+
+  final AppState state;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final allSafe = lowBatteryCount == 0;
-    final color = allSafe ? LocmateColors.safe : LocmateColors.warning;
+    final lowBatteryCount = state.lowBatteryCount;
+    final alone = state.members.length <= 1;
+    final allSharing =
+        state.members.isNotEmpty &&
+        state.members.every(
+          (member) => member.isSharing && member.position != null,
+        );
+    final healthy = alone ? state.sharingCount > 0 : allSharing;
+    final color = healthy ? LocmateColors.safe : LocmateColors.warning;
+    final title = alone
+        ? 'You’re sharing your location'
+        : lowBatteryCount > 0
+        ? '$lowBatteryCount member${lowBatteryCount == 1 ? '' : 's'} '
+              'need${lowBatteryCount == 1 ? 's' : ''} a charge'
+        : allSharing
+        ? 'All members are safe'
+        : 'Waiting for the full circle';
+    final subtitle = alone
+        ? 'Invite someone to see each other on the map.'
+        : lowBatteryCount > 0
+        ? 'Check in with your circle and ask them to charge.'
+        : allSharing
+        ? 'Everyone has a recent location and enough battery.'
+        : 'Some members have not shared a location yet.';
+
     return SurfaceCard(
       padding: const EdgeInsets.all(14),
       color: color.withValues(alpha: isDark ? 0.12 : 0.07),
@@ -290,7 +380,9 @@ class _SafeBanner extends StatelessWidget {
               shape: BoxShape.circle,
             ),
             child: Icon(
-              allSafe ? Icons.verified_user_rounded : Icons.battery_alert_rounded,
+              healthy
+                  ? Icons.verified_user_rounded
+                  : Icons.battery_alert_rounded,
               color: color,
               size: 22,
             ),
@@ -301,9 +393,7 @@ class _SafeBanner extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  allSafe
-                      ? 'All members are safe'
-                      : '$lowBatteryCount member${lowBatteryCount == 1 ? '' : 's'} need${lowBatteryCount == 1 ? 's' : ''} a charge',
+                  title,
                   style: const TextStyle(
                     fontSize: 13.5,
                     fontWeight: FontWeight.w700,
@@ -311,9 +401,7 @@ class _SafeBanner extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  allSafe
-                      ? 'Everyone checked in within the last few minutes.'
-                      : 'Check in with your circle and ask them to charge.',
+                  subtitle,
                   style: TextStyle(
                     fontSize: 11.5,
                     height: 1.3,
@@ -330,7 +418,7 @@ class _SafeBanner extends StatelessWidget {
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
-              '${memberCount - lowBatteryCount}/$memberCount OK',
+              '${state.sharingCount}/${state.members.length} live',
               style: TextStyle(
                 fontSize: 10.5,
                 fontWeight: FontWeight.w700,
@@ -344,13 +432,27 @@ class _SafeBanner extends StatelessWidget {
   }
 }
 
-class _DrivingReportCard extends StatelessWidget {
-  const _DrivingReportCard();
+class _CircleStatusCard extends StatelessWidget {
+  const _CircleStatusCard({required this.state, required this.onCopyInvite});
+
+  final AppState state;
+  final VoidCallback onCopyInvite;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final paused = state.members
+        .where((member) => !member.isSharing)
+        .map((member) => member.isCurrentUser ? 'You' : member.firstName)
+        .toList();
+    final latest = state.members
+        .where((member) => member.lastUpdated != null)
+        .map((member) => member.lastUpdated!)
+        .fold<DateTime?>(null, (latest, time) {
+          if (latest == null || time.isAfter(latest)) return time;
+          return latest;
+        });
 
     return SurfaceCard(
       child: Column(
@@ -366,7 +468,7 @@ class _DrivingReportCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(11),
                 ),
                 child: Icon(
-                  Icons.directions_car_rounded,
+                  Icons.groups_rounded,
                   size: 19,
                   color: scheme.primary,
                 ),
@@ -377,14 +479,16 @@ class _DrivingReportCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'Driving report',
+                      'Circle status',
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
                     Text(
-                      'This week · all circle drivers',
+                      'Live overview of ${state.circleName}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 11,
                         color: scheme.onSurfaceVariant,
@@ -394,8 +498,7 @@ class _DrivingReportCard extends StatelessWidget {
                 ),
               ),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: scheme.onSurface.withValues(
                     alpha: isDark ? 0.1 : 0.05,
@@ -403,7 +506,7 @@ class _DrivingReportCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: Text(
-                  'DEMO',
+                  'LIVE',
                   style: TextStyle(
                     fontSize: 9,
                     fontWeight: FontWeight.w800,
@@ -414,57 +517,104 @@ class _DrivingReportCard extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              const _ReportStat(value: '42.3', label: 'Miles'),
-              _divider(scheme),
-              const _ReportStat(value: '68', label: 'Top mph'),
-              _divider(scheme),
-              const _ReportStat(value: '2', label: 'Hard brakes'),
-            ],
+          const SizedBox(height: 14),
+          _StatusRow(
+            icon: Icons.share_location_rounded,
+            label: 'Sharing now',
+            value: '${state.sharingCount} of ${state.members.length}',
           ),
+          const SizedBox(height: 9),
+          _StatusRow(
+            icon: Icons.location_off_rounded,
+            label: 'Paused',
+            value: paused.isEmpty ? 'Nobody' : paused.join(', '),
+          ),
+          const SizedBox(height: 9),
+          _StatusRow(
+            icon: Icons.schedule_rounded,
+            label: 'Latest update',
+            value: latest == null
+                ? 'Waiting for the first fix'
+                : timeAgo(latest),
+          ),
+          if (state.members.length <= 1 && state.inviteCode.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+              decoration: BoxDecoration(
+                color: scheme.primary.withValues(alpha: 0.07),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.group_add_rounded,
+                    size: 17,
+                    color: scheme.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Invite code  ${state.inviteCode}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.6,
+                        color: scheme.primary,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: onCopyInvite,
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 32),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                    child: const Text('Copy'),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
   }
-
-  Widget _divider(ColorScheme scheme) => Container(
-        width: 1,
-        height: 30,
-        color: scheme.outlineVariant.withValues(alpha: 0.6),
-      );
 }
 
-class _ReportStat extends StatelessWidget {
-  const _ReportStat({required this.value, required this.label});
+class _StatusRow extends StatelessWidget {
+  const _StatusRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
 
-  final String value;
+  final IconData icon;
   final String label;
+  final String value;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Expanded(
-      child: Column(
-        children: [
-          Text(
+    return Row(
+      children: [
+        Icon(icon, size: 15, color: scheme.onSurfaceVariant),
+        const SizedBox(width: 8),
+        Text(
+          label,
+          style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
             value,
-            style: const TextStyle(
-              fontSize: 17,
-              fontWeight: FontWeight.w800,
-            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.right,
+            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
           ),
-          const SizedBox(height: 2),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 10.5,
-              color: scheme.onSurfaceVariant,
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -523,10 +673,7 @@ class _AlertTile extends StatelessWidget {
             const SizedBox(width: 8),
             Text(
               timeAgo(alert.timestamp),
-              style: TextStyle(
-                fontSize: 10,
-                color: scheme.onSurfaceVariant,
-              ),
+              style: TextStyle(fontSize: 10, color: scheme.onSurfaceVariant),
             ),
           ],
         ),

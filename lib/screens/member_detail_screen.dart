@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -31,6 +31,8 @@ class MemberDetailScreen extends StatelessWidget {
 
     final place = state.placeFor(member);
     final recentAlerts = state.alertsForMember(member.id).take(5).toList();
+    final distance = state.distanceToMe(member);
+    final battery = member.battery;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Member details')),
@@ -71,7 +73,9 @@ class MemberDetailScreen extends StatelessWidget {
                             shape: BoxShape.circle,
                             color: member.isMoving
                                 ? LocmateColors.safe
-                                : scheme.primary,
+                                : member.isSharing
+                                    ? scheme.primary
+                                    : LocmateColors.muted,
                           ),
                         ),
                         const SizedBox(width: 6),
@@ -130,8 +134,10 @@ class MemberDetailScreen extends StatelessWidget {
                   child: _StatCard(
                     icon: Icons.battery_charging_full_rounded,
                     label: 'Battery',
-                    value: '${member.battery.round()}%',
-                    color: batteryColor(member.battery),
+                    value: battery == null ? 'Unknown' : '${battery.round()}%',
+                    color: battery == null
+                        ? LocmateColors.muted
+                        : batteryColor(battery),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -142,7 +148,7 @@ class MemberDetailScreen extends StatelessWidget {
                         ? 'Speed'
                         : 'Movement',
                     value: member.motion == MotionState.driving
-                        ? '${member.speedMph.round()} mph'
+                        ? '${(member.speed * 2.23694).round()} mph'
                         : member.motion == MotionState.walking
                             ? 'Walking'
                             : 'Still',
@@ -176,7 +182,13 @@ class MemberDetailScreen extends StatelessWidget {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              place != null ? place.name : 'On the move',
+                              !member.isSharing
+                                  ? 'Location paused'
+                                  : place != null
+                                      ? place.name
+                                      : member.position != null
+                                          ? 'On the map'
+                                          : 'Not available yet',
                               style: const TextStyle(
                                 fontSize: 14.5,
                                 fontWeight: FontWeight.w700,
@@ -194,18 +206,7 @@ class MemberDetailScreen extends StatelessWidget {
                         ),
                       ),
                       IconButton(
-                        onPressed: () {
-                          state.touchMemberLocation(member.id);
-                          ScaffoldMessenger.of(context)
-                            ..hideCurrentSnackBar()
-                            ..showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  'Location refreshed for ${member.firstName}',
-                                ),
-                              ),
-                            );
-                        },
+                        onPressed: () => _refreshLocation(context, state, member),
                         tooltip: 'Refresh location',
                         icon: Icon(
                           Icons.my_location_rounded,
@@ -234,8 +235,9 @@ class MemberDetailScreen extends StatelessWidget {
                         const SizedBox(width: 6),
                         Expanded(
                           child: Text(
-                            '${member.position.latitude.toStringAsFixed(4)}, '
-                            '${member.position.longitude.toStringAsFixed(4)}',
+                            member.position == null
+                                ? 'No coordinates shared'
+                                : formatCoordinates(member.position!),
                             style: TextStyle(
                               fontSize: 11.5,
                               color: scheme.onSurfaceVariant,
@@ -243,7 +245,9 @@ class MemberDetailScreen extends StatelessWidget {
                           ),
                         ),
                         Text(
-                          'Updated ${timeAgo(member.lastUpdated)}',
+                          member.lastUpdated == null
+                              ? 'Never'
+                              : 'Updated ${timeAgo(member.lastUpdated!)}',
                           style: TextStyle(
                             fontSize: 10.5,
                             color: scheme.onSurfaceVariant,
@@ -264,12 +268,24 @@ class MemberDetailScreen extends StatelessWidget {
                       Text(
                         member.isCurrentUser
                             ? 'This is you'
-                            : '${formatDistance(state.distanceToMe(member))} away from you',
+                            : distance == null
+                                ? 'Distance unavailable'
+                                : '${formatDistance(distance)} away from you',
                         style: TextStyle(
                           fontSize: 11.5,
                           color: scheme.onSurfaceVariant,
                         ),
                       ),
+                      if (member.accuracy != null) ...[
+                        const Spacer(),
+                        Text(
+                          '±${member.accuracy!.round()} m',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ],
@@ -302,10 +318,40 @@ class MemberDetailScreen extends StatelessWidget {
     );
   }
 
+  Future<void> _refreshLocation(
+    BuildContext context,
+    AppState state,
+    Member member,
+  ) async {
+    await state.refreshMemberLocation(member.id);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            member.isCurrentUser
+                ? 'Location refreshed'
+                : 'Location refreshed for ${member.firstName}',
+          ),
+        ),
+      );
+  }
+
   Future<void> _openDirections(BuildContext context, Member member) async {
+    if (member.position == null) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('No shared location is available for directions.'),
+          ),
+        );
+      return;
+    }
     final uri = Uri.parse(
       'https://www.google.com/maps/dir/?api=1&destination='
-      '${member.position.latitude},${member.position.longitude}',
+      '${member.position!.latitude},${member.position!.longitude}',
     );
     var launched = false;
     try {
@@ -321,8 +367,7 @@ class MemberDetailScreen extends StatelessWidget {
           SnackBar(
             content: Text(
               'Could not open maps. ${member.firstName} is at '
-              '${member.position.latitude.toStringAsFixed(4)}, '
-              '${member.position.longitude.toStringAsFixed(4)}.',
+              '${formatCoordinates(member.position!)}.',
             ),
           ),
         );

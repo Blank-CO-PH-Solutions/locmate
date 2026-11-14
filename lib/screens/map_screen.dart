@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
@@ -23,23 +24,45 @@ class MapScreen extends StatefulWidget {
 class _MapScreenState extends State<MapScreen> {
   final MapController _mapController = MapController();
   bool _mapReady = false;
+  bool _autoCentered = false;
 
   static const String _tilesUrl =
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-  static const LatLng _initialCenter = LatLng(30.2672, -97.7412);
+  static const LatLng _worldCenter = LatLng(20, 0);
+
+  LatLng? _firstMemberPosition(AppState state) {
+    for (final member in state.members) {
+      if (member.position != null) return member.position;
+    }
+    return null;
+  }
+
+  LatLng _initialCenter(AppState state) =>
+      state.currentUserOrNull?.position ??
+      state.lastKnownPosition ??
+      _firstMemberPosition(state) ??
+      _worldCenter;
 
   void _focusMember(Member member) {
     context.read<AppState>().selectMember(member.id);
-    if (_mapReady) {
-      _mapController.move(member.position, 15.4);
+    if (_mapReady && member.position != null) {
+      _mapController.move(member.position!, 15.4);
     }
   }
 
   void _recenter() {
     final state = context.read<AppState>();
-    if (_mapReady) {
-      _mapController.move(state.currentUser.position, 15.8);
+    final position = state.currentUserOrNull?.position;
+    if (position == null) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Waiting for your location…')),
+        );
+      state.refreshMyLocation();
+      return;
     }
+    if (_mapReady) _mapController.move(position, 15.8);
   }
 
   void _openChat() {
@@ -65,10 +88,22 @@ class _MapScreenState extends State<MapScreen> {
         SnackBar(
           content: Text(
             state.sharingEnabled
-                ? 'Location sharing resumed for the circle'
+                ? 'Location sharing resumed'
                 : 'Location sharing paused',
           ),
         ),
+      );
+  }
+
+  Future<void> _copyInviteCode() async {
+    final code = context.read<AppState>().inviteCode;
+    if (code.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: code));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text('Invite code $code copied')),
       );
   }
 
@@ -77,9 +112,20 @@ class _MapScreenState extends State<MapScreen> {
     final state = context.watch<AppState>();
     final selected = state.selectedMember;
     final mapMembers = [...state.members]
-      ..sort(
-        (a, b) => b.position.latitude.compareTo(a.position.latitude),
-      );
+      ..sort((a, b) => a.isCurrentUser == b.isCurrentUser
+          ? 0
+          : (a.isCurrentUser ? -1 : 1));
+
+    if (!_autoCentered && _mapReady) {
+      final position = state.currentUserOrNull?.position;
+      if (position != null) {
+        _autoCentered = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _mapController.move(position, 15.6);
+        });
+      }
+    }
 
     return Scaffold(
       body: Stack(
@@ -87,9 +133,9 @@ class _MapScreenState extends State<MapScreen> {
           FlutterMap(
             mapController: _mapController,
             options: MapOptions(
-              initialCenter: _initialCenter,
-              initialZoom: 14,
-              minZoom: 3,
+              initialCenter: _initialCenter(state),
+              initialZoom: state.currentUserOrNull?.position == null ? 3 : 15,
+              minZoom: 2,
               maxZoom: 18,
               onMapReady: () => _mapReady = true,
               onTap: (_, _) => state.selectMember(null),
@@ -113,17 +159,18 @@ class _MapScreenState extends State<MapScreen> {
                       child: _PlaceMarker(place: place),
                     ),
                   for (final member in mapMembers)
-                    Marker(
-                      point: member.position,
-                      width: 88,
-                      height: 88,
-                      alignment: Alignment.topCenter,
-                      child: _MemberMarker(
-                        member: member,
-                        selected: member.id == selected?.id,
-                        onTap: () => _focusMember(member),
+                    if (member.position != null)
+                      Marker(
+                        point: member.position!,
+                        width: 88,
+                        height: 88,
+                        alignment: Alignment.topCenter,
+                        child: _MemberMarker(
+                          member: member,
+                          selected: member.id == selected?.id,
+                          onTap: () => _focusMember(member),
+                        ),
                       ),
-                    ),
                 ],
               ),
             ],
@@ -140,6 +187,27 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
+          if (state.locationError != null)
+            Positioned(
+              top: MediaQuery.paddingOf(context).top + 86,
+              left: 14,
+              right: 14,
+              child: _LocationBanner(
+                message: state.locationError!,
+                onAction: () => state.openSystemLocationSettings(),
+              ),
+            ),
+          if (state.syncError != null)
+            Positioned(
+              top: MediaQuery.paddingOf(context).top +
+                  (state.locationError != null ? 146 : 86),
+              left: 14,
+              right: 14,
+              child: _SyncErrorBanner(
+                message: state.syncError!,
+                onRetry: state.refreshData,
+              ),
+            ),
           Positioned(
             left: 0,
             right: 0,
@@ -153,6 +221,7 @@ class _MapScreenState extends State<MapScreen> {
                 onRecenter: _recenter,
                 onOpenChat: _openChat,
                 onOpenDetails: _openDetails,
+                onCopyInvite: _copyInviteCode,
               ),
             ),
           ),
@@ -175,12 +244,15 @@ class _MapHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final sharing = state.sharingEnabled;
+    final memberCount = state.members.length;
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
       child: Container(
         padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
         decoration: BoxDecoration(
-          color: scheme.surface.withValues(alpha: 0.96),
+          color: scheme.surface.withValues(alpha: 0.97),
           borderRadius: BorderRadius.circular(22),
           border: Border.all(
             color: isDark ? const Color(0xFF2A2536) : LocmateColors.line,
@@ -203,7 +275,9 @@ class _MapHeader extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    AppState.circleName,
+                    state.circleName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w800,
@@ -218,7 +292,7 @@ class _MapHeader extends StatelessWidget {
                         height: 7,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: state.sharingEnabled
+                          color: sharing
                               ? LocmateColors.safe
                               : LocmateColors.warning,
                         ),
@@ -226,8 +300,9 @@ class _MapHeader extends StatelessWidget {
                       const SizedBox(width: 5),
                       Flexible(
                         child: Text(
-                          state.sharingEnabled
-                              ? '${state.members.length} members · live'
+                          sharing
+                              ? '$memberCount member${memberCount == 1 ? '' : 's'} · '
+                                  '${state.sharingCount} sharing'
                               : 'Location sharing paused',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -245,24 +320,114 @@ class _MapHeader extends StatelessWidget {
             ),
             IconButton(
               onPressed: onToggleSharing,
-              tooltip: state.sharingEnabled
+              tooltip: sharing
                   ? 'Pause location sharing'
                   : 'Resume location sharing',
               style: IconButton.styleFrom(
-                backgroundColor: state.sharingEnabled
+                backgroundColor: sharing
                     ? scheme.primary.withValues(alpha: 0.1)
                     : LocmateColors.warning.withValues(alpha: 0.14),
                 padding: const EdgeInsets.all(9),
               ),
               icon: Icon(
-                state.sharingEnabled
+                sharing
                     ? Icons.share_location_rounded
                     : Icons.location_disabled_rounded,
                 size: 20,
-                color: state.sharingEnabled
-                    ? scheme.primary
-                    : LocmateColors.warning,
+                color: sharing ? scheme.primary : LocmateColors.warning,
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LocationBanner extends StatelessWidget {
+  const _LocationBanner({required this.message, required this.onAction});
+
+  final String message;
+  final VoidCallback onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surface,
+      borderRadius: BorderRadius.circular(16),
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.location_off_rounded,
+              size: 19,
+              color: LocmateColors.warning,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(fontSize: 11.5, height: 1.35),
+              ),
+            ),
+            TextButton(
+              onPressed: onAction,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                minimumSize: const Size(0, 34),
+              ),
+              child: const Text('Fix'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SyncErrorBanner extends StatelessWidget {
+  const _SyncErrorBanner({required this.message, required this.onRetry});
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xFFFFF4F4),
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.cloud_off_rounded,
+              size: 18,
+              color: LocmateColors.danger,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11,
+                  height: 1.3,
+                  color: LocmateColors.danger,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: onRetry,
+              style: TextButton.styleFrom(
+                minimumSize: const Size(0, 32),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              child: const Text('Retry'),
             ),
           ],
         ),
@@ -279,6 +444,7 @@ class _CirclePanel extends StatelessWidget {
     required this.onRecenter,
     required this.onOpenChat,
     required this.onOpenDetails,
+    required this.onCopyInvite,
   });
 
   final AppState state;
@@ -287,11 +453,13 @@ class _CirclePanel extends StatelessWidget {
   final VoidCallback onRecenter;
   final VoidCallback onOpenChat;
   final ValueChanged<Member> onOpenDetails;
+  final VoidCallback onCopyInvite;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final alone = state.members.length <= 1;
 
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
@@ -376,6 +544,13 @@ class _CirclePanel extends StatelessWidget {
               },
             ),
           ),
+          if (alone && state.inviteCode.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _InviteRow(
+              code: state.inviteCode,
+              onCopy: onCopyInvite,
+            ),
+          ],
           if (selected != null) ...[
             const SizedBox(height: 10),
             Container(
@@ -386,7 +561,13 @@ class _CirclePanel extends StatelessWidget {
               ),
               child: Row(
                 children: [
-                  Icon(Icons.place_rounded, size: 18, color: scheme.primary),
+                  Icon(
+                    selected!.isSharing || selected!.isCurrentUser
+                        ? Icons.place_rounded
+                        : Icons.location_off_rounded,
+                    size: 18,
+                    color: scheme.primary,
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Column(
@@ -452,6 +633,61 @@ class _CirclePanel extends StatelessWidget {
                 fontSize: 9,
                 color: scheme.onSurfaceVariant.withValues(alpha: 0.8),
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InviteRow extends StatelessWidget {
+  const _InviteRow({required this.code, required this.onCopy});
+
+  final String code;
+  final VoidCallback onCopy;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+      decoration: BoxDecoration(
+        color: scheme.primary.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.group_add_rounded, size: 18, color: scheme.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text.rich(
+              TextSpan(
+                text: 'Invite code  ',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: scheme.onSurfaceVariant,
+                ),
+                children: [
+                  TextSpan(
+                    text: code,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.6,
+                      color: scheme.primary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          TextButton.icon(
+            onPressed: onCopy,
+            icon: const Icon(Icons.copy_rounded, size: 15),
+            label: const Text('Copy'),
+            style: TextButton.styleFrom(
+              minimumSize: const Size(0, 32),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
             ),
           ),
         ],
@@ -541,7 +777,9 @@ class _MemberCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 9),
                 Text(
-                  member.isCurrentUser ? '${member.firstName} (You)' : member.name,
+                  member.isCurrentUser
+                      ? '${member.firstName} (You)'
+                      : member.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -553,26 +791,28 @@ class _MemberCard extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   status,
-                  maxLines: 1,
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 11,
+                    height: 1.25,
                     color: scheme.onSurfaceVariant,
                   ),
                 ),
                 const Spacer(),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: (member.battery / 100).clamp(0.0, 1.0),
-                    minHeight: 4,
-                    backgroundColor:
-                        scheme.onSurface.withValues(alpha: 0.08),
-                    valueColor: AlwaysStoppedAnimation<Color>(
-                      batteryColor(member.battery),
+                if (member.battery != null)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: (member.battery! / 100).clamp(0.0, 1.0),
+                      minHeight: 4,
+                      backgroundColor:
+                          scheme.onSurface.withValues(alpha: 0.08),
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        batteryColor(member.battery!),
+                      ),
                     ),
                   ),
-                ),
               ],
             ),
           ),
@@ -607,7 +847,7 @@ class _MemberMarker extends StatelessWidget {
               MemberAvatar(
                 member: member,
                 size: selected ? 50 : 44,
-                showBattery: true,
+                showBattery: false,
               ),
               if (member.isCurrentUser)
                 Positioned(

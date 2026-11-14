@@ -1,6 +1,9 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+
+import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'models/alert_event.dart';
 import 'theme.dart';
@@ -15,9 +18,13 @@ String formatDistance(double meters) {
   return '${(meters / 1000).toStringAsFixed(1)} km';
 }
 
+String formatCoordinates(LatLng point) =>
+    '${point.latitude.toStringAsFixed(4)}, '
+    '${point.longitude.toStringAsFixed(4)}';
+
 String timeAgo(DateTime time) {
   final diff = DateTime.now().difference(time);
-  if (diff.inSeconds < 45) return 'Just now';
+  if (diff.isNegative || diff.inSeconds < 45) return 'Just now';
   if (diff.inMinutes < 60) return '${diff.inMinutes} min ago';
   if (diff.inHours < 24) return '${diff.inHours} h ago';
   if (diff.inDays == 1) return 'Yesterday';
@@ -95,3 +102,92 @@ Color alertColor(AlertType type) => switch (type) {
       AlertType.speed => LocmateColors.accent,
       AlertType.info => LocmateColors.muted,
     };
+
+/// Turns low-level auth/network/database failures into copy that users can act
+/// on.
+String friendlyError(Object error) {
+  if (error is AuthException) {
+    final message = error.message.toLowerCase();
+    if (message.contains('invalid login credentials')) {
+      return 'That email and password do not match.';
+    }
+    if (message.contains('email not confirmed')) {
+      return 'Confirm your email first, then sign in.';
+    }
+    if (message.contains('already registered') ||
+        message.contains('already been registered')) {
+      return 'An account with that email already exists. Sign in instead.';
+    }
+    if (message.contains('password')) {
+      return error.message;
+    }
+    if (message.contains('rate limit') || message.contains('too many')) {
+      return 'Too many attempts. Wait a moment and try again.';
+    }
+    return error.message;
+  }
+  if (error is PostgrestException) {
+    if (error.code == '23505') {
+      return 'That invite code is already in use. Create the circle again.';
+    }
+    return error.message;
+  }
+  if (error is TimeoutException) {
+    return 'Locmate took too long to respond. Check your connection.';
+  }
+  if (error is FormatException) {
+    return 'The server sent an unexpected response. Try again.';
+  }
+  final raw = error.toString();
+  if (raw.contains('SocketException') ||
+      raw.contains('Failed host lookup') ||
+      raw.contains('Connection refused') ||
+      raw.contains('ClientException')) {
+    return 'Can’t reach Locmate. Check your internet connection.';
+  }
+  return raw.replaceFirst('Exception: ', '');
+}
+
+class Validators {
+  const Validators._();
+
+  static final RegExp _email = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+  static final RegExp _inviteCode = RegExp(r'^[A-Z0-9]{6}$');
+
+  static String? email(String? value) {
+    final text = value?.trim() ?? '';
+    if (text.isEmpty) return 'Enter your email.';
+    if (!_email.hasMatch(text)) return 'Enter a valid email address.';
+    return null;
+  }
+
+  static String? password(String? value) {
+    final text = value ?? '';
+    if (text.isEmpty) return 'Enter a password.';
+    if (text.length < 8) return 'Use at least 8 characters.';
+    return null;
+  }
+
+  static String? name(String? value) {
+    final text = value?.trim() ?? '';
+    if (text.isEmpty) return 'Enter your name.';
+    if (text.length > 60) return 'Keep your name under 60 characters.';
+    return null;
+  }
+
+  static String? circleName(String? value) {
+    final text = value?.trim() ?? '';
+    if (text.isEmpty) return 'Give your circle a name.';
+    if (text.length > 60) return 'Keep the name under 60 characters.';
+    return null;
+  }
+
+  static String? inviteCode(String? value) {
+    final text = value?.trim().toUpperCase() ?? '';
+    if (text.isEmpty) return 'Enter an invite code.';
+    if (!_inviteCode.hasMatch(text)) {
+      return 'Invite codes are six letters or numbers.';
+    }
+    return null;
+  }
+}

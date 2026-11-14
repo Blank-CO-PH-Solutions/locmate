@@ -1,44 +1,131 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
 
-import 'package:flutter/material.dart';
-import 'package:latlong2/latlong.dart';
+import 'package:battery_plus/battery_plus.dart';
+import 'package:flutter/foundation.dart';
+import 'package:material_ui/material_ui.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:latlong2/latlong.dart' hide Circle;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:uuid/uuid.dart';
 
+import '../config.dart';
+import '../services/subscription_service.dart';
 import '../models/alert_event.dart';
+import '../models/circle.dart';
 import '../models/member.dart';
 import '../models/message.dart';
 import '../models/place.dart';
-import '../theme.dart';
+import '../models/profile.dart';
 import '../utils.dart';
 
-class AppState extends ChangeNotifier {
-  static const String circleName = 'Carter Family';
-  static const String _settingsKey = 'locmate.settings.v1';
-  static const String _placesKey = 'locmate.places.v1';
+enum AppPhase { loading, signedOut, setup, ready, error }
 
-  final List<Member> _members = [];
-  final List<AlertEvent> _alerts = [];
-  final List<ChatMessage> _messages = [];
-  List<Place> _places = [];
+/// Central app state backed by Supabase.
+///
+/// The current user authenticates with Supabase Auth, belongs to one circle and
+/// receives live updates for locations, places, chat and alerts through
+/// Supabase Realtime.
+class AppState extends ChangeNotifier with WidgetsBindingObserver {
+  AppState({SupabaseClient? client})
+    : _client =
+          client ??
+          SupabaseClient(SupabaseConfig.url, SupabaseConfig.publishableKey);
+
+  @visibleForTesting
+  AppState.preview({
+    this.phase = AppPhase.ready,
+    this.profile,
+    this.circle,
+    List<Member> members = const [],
+    List<Place> places = const [],
+    List<ChatMessage> messages = const [],
+    List<AlertEvent> alerts = const [],
+    this.darkMode = false,
+    this.mapDark = false,
+    this.circlePremium = false,
+  }) : _client = SupabaseClient(
+         SupabaseConfig.url,
+         SupabaseConfig.publishableKey,
+         authOptions: const AuthClientOptions(autoRefreshToken: false),
+       ) {
+    _members = [...members];
+    _places = [...places];
+    _messages = [...messages];
+    _alerts = [...alerts];
+    for (final member in members) {
+      if (member.isCurrentUser) {
+        sharingEnabled = member.isSharing;
+        break;
+      }
+    }
+  }
+
+  static const String _settingsKey = 'locmate.settings.v2';
+  static const String _lastLocationKey = 'locmate.last_location.v1';
+  static const Duration _publishInterval = Duration(seconds: 15);
+  static const double _publishDistanceMeters = 25;
+
+  final SupabaseClient _client;
+  final Battery _battery = Battery();
+  final Uuid _uuid = const Uuid();
 
   SharedPreferences? _prefs;
-  Timer? _simTimer;
-  Timer? _replyTimer;
-  final Random _random = Random(360);
-  int _tickCount = 0;
-  int _messageCounter = 0;
+  StreamSubscription<AuthState>? _authSub;
+  StreamSubscription<Position>? _positionSub;
+  RealtimeChannel? _channel;
+  Future<void>? _sessionFuture;
+  int _authGeneration = 0;
   bool _disposed = false;
+  bool _publishingLocation = false;
+  bool _geofencePrimed = false;
+  bool _batteryAlerted = false;
+  DateTime? _lastPublishAt;
+  DateTime? _lastSavedAt;
+  LatLng? _lastPublishedPosition;
+  String? _lastPlaceId;
 
-  bool isReady = false;
+  AppPhase phase = AppPhase.loading;
+  String? startupError;
+  String? syncError;
+  String? locationError;
+  bool locationPermissionDenied = false;
+  bool locationServiceDisabled = false;
+
+  /// True on iOS when only "While using the app" was granted, so updates stop
+  /// shortly after the app goes to the background.
+  bool backgroundLocationLimited = false;
+  bool _askedForAlways = false;
+  UserProfile? profile;
+  Circle? circle;
+  LatLng? currentPosition;
+  LatLng? lastKnownPosition;
+  LatLng? _lastPosition;
   bool sharingEnabled = true;
-  bool notificationsEnabled = true;
-  bool batterySaver = false;
   bool darkMode = false;
   bool mapDark = false;
+  bool batterySaver = false;
+  bool refreshing = false;
   String? selectedMemberId;
-  DateTime circleUpdatedAt = DateTime.now();
+
+  // Subscription plan. A circle is Premium when its owner subscribes; the
+  // database enforces the Free limits (see PlanLimits).
+  bool circlePremium = false;
+  bool userPremium = false;
+
+  int? get memberLimit => circlePremium ? null : PlanLimits.freeMembers;
+  int? get placeLimit => circlePremium ? null : PlanLimits.freePlaces;
+  bool get canAddPlace => placeLimit == null || _places.length < placeLimit!;
+  bool get isOwner {
+    final id = userId ?? currentUserOrNull?.id;
+    return circle != null && circle!.ownerId == id;
+  }
+
+  List<Member> _members = [];
+  List<Place> _places = [];
+  List<ChatMessage> _messages = [];
+  List<AlertEvent> _alerts = [];
 
   List<Member> get members => List.unmodifiable(_members);
   List<Place> get places => List.unmodifiable(_places);
@@ -50,8 +137,22 @@ class AppState extends ChangeNotifier {
     return copy;
   }
 
-  Member get currentUser =>
-      _members.firstWhere((member) => member.isCurrentUser);
+  String? get userId => _client.auth.currentUser?.id;
+  String? get userEmail => _client.auth.currentUser?.email;
+  String get circleName => circle?.name ?? 'Your circle';
+  String get inviteCode => circle?.inviteCode ?? '';
+
+  Member? get currentUserOrNull {
+    for (final member in _members) {
+      if (member.isCurrentUser) return member;
+    }
+    return null;
+  }
+
+  Member get currentUser => _members.firstWhere(
+    (member) => member.isCurrentUser,
+    orElse: () => throw StateError('The current user is not loaded yet.'),
+  );
 
   Member? get selectedMember => memberById(selectedMemberId);
 
@@ -71,95 +172,1032 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  Place? placeFor(Member member) => placeById(member.currentPlaceId);
+  Place? placeFor(Member member) {
+    if (member.position == null) return null;
+    for (final place in _places) {
+      if (distanceMeters(member.position!, place.point) <= place.radiusMeters) {
+        return place;
+      }
+    }
+    return null;
+  }
 
   List<Member> membersAtPlace(Place place) => _members
       .where(
-          (member) => distanceMeters(member.position, place.point) <= place.radiusMeters)
+        (member) =>
+            member.position != null &&
+            distanceMeters(member.position!, place.point) <= place.radiusMeters,
+      )
       .toList();
 
   bool isAtPlace(Member member, Place place) =>
-      distanceMeters(member.position, place.point) <= place.radiusMeters;
+      member.position != null &&
+      distanceMeters(member.position!, place.point) <= place.radiusMeters;
+
+  int get lowBatteryCount =>
+      _members.where((member) => (member.battery ?? 100) <= 20).length;
+
+  int get sharingCount => _members
+      .where((member) => member.isSharing && member.position != null)
+      .length;
 
   String statusFor(Member member) {
+    if (!member.isSharing) return 'Location sharing paused';
+    if (member.position == null) {
+      return member.isCurrentUser
+          ? 'Waiting for your location'
+          : 'Waiting for location';
+    }
     final place = placeFor(member);
     if (place != null) return 'At ${place.name}';
-    switch (member.motion) {
-      case MotionState.driving:
-        return 'Driving · ${member.speedMph.round()} mph';
-      case MotionState.walking:
-        return 'Walking';
-      case MotionState.stationary:
-        return 'Stationary';
+    if (member.isStale && !member.isCurrentUser) {
+      return 'Last seen ${timeAgo(member.lastUpdated!)}';
     }
+    return switch (member.motion) {
+      MotionState.driving =>
+        'Driving · ${(member.speed * 2.23694).round()} mph',
+      MotionState.walking => 'Walking',
+      MotionState.stationary => 'Stationary',
+    };
   }
 
   String locationLabelFor(Member member) {
+    if (!member.isSharing) return 'Location paused';
     final place = placeFor(member);
-    if (place != null) return place.address;
-    return '${member.position.latitude.toStringAsFixed(4)}, '
-        '${member.position.longitude.toStringAsFixed(4)}';
+    if (place != null) return place.displayAddress;
+    if (member.position != null) return formatCoordinates(member.position!);
+    return 'Location not available yet';
   }
 
-  double distanceToMe(Member member) =>
-      distanceMeters(currentUser.position, member.position);
+  double? distanceToMe(Member member) {
+    final me = currentUserOrNull;
+    if (me?.position == null || member.position == null) return null;
+    return distanceMeters(me!.position!, member.position!);
+  }
 
   List<AlertEvent> alertsForMember(String memberId) =>
       alerts.where((alert) => alert.memberId == memberId).toList();
 
-  int get lowBatteryCount =>
-      _members.where((member) => member.battery <= 20).length;
+  // ---------------------------------------------------------------------------
+  // Lifecycle and auth
+  // ---------------------------------------------------------------------------
 
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
-    final rawSettings = _prefs?.getString(_settingsKey);
-    if (rawSettings != null) {
-      try {
-        final decoded = jsonDecode(rawSettings) as Map<String, dynamic>;
-        sharingEnabled = decoded['sharing'] as bool? ?? true;
-        notificationsEnabled = decoded['notifications'] as bool? ?? true;
-        batterySaver = decoded['batterySaver'] as bool? ?? false;
-        darkMode = decoded['darkMode'] as bool? ?? false;
-        mapDark = decoded['mapDark'] as bool? ?? false;
-      } catch (_) {
-        // Ignore malformed settings and fall back to defaults.
-      }
+    _loadSettings();
+    lastKnownPosition = _loadLastLocation();
+    WidgetsBinding.instance.addObserver(this);
+    _authSub = _client.auth.onAuthStateChange.listen(_onAuthState);
+
+    if (_client.auth.currentSession == null) {
+      _handleSignedOut();
+    } else {
+      await _loadSession();
+    }
+  }
+
+  void _onAuthState(AuthState authState) {
+    switch (authState.event) {
+      case AuthChangeEvent.signedIn:
+      case AuthChangeEvent.initialSession:
+      case AuthChangeEvent.tokenRefreshed:
+        if (phase == AppPhase.signedOut || phase == AppPhase.loading) {
+          unawaited(_loadSession());
+        }
+      case AuthChangeEvent.signedOut:
+        _handleSignedOut();
+      default:
+        break;
+    }
+  }
+
+  Future<void> _loadSession() {
+    return _sessionFuture ??= _doLoadSession().whenComplete(() {
+      _sessionFuture = null;
+    });
+  }
+
+  Future<void> _doLoadSession() async {
+    final generation = ++_authGeneration;
+    final user = _client.auth.currentUser;
+    if (user == null) {
+      _handleSignedOut();
+      return;
     }
 
-    _places = _restorePlaces() ?? _defaultPlaces();
-    _seedMembers();
-    _seedAlerts();
-    _seedMessages();
-    _syncInitialPlaces();
+    phase = AppPhase.loading;
+    startupError = null;
+    notifyListeners();
 
-    isReady = true;
-    circleUpdatedAt = DateTime.now();
-    _simTimer = Timer.periodic(const Duration(seconds: 3), (_) => _tick());
+    try {
+      final profileRow = await _client
+          .from('profiles')
+          .select()
+          .eq('id', user.id)
+          .maybeSingle();
+      if (generation != _authGeneration) return;
+
+      UserProfile loadedProfile;
+      if (profileRow == null) {
+        final row = await _client
+            .from('profiles')
+            .insert({
+              'id': user.id,
+              'display_name': _fallbackName(user),
+              'color_index': _fallbackColor(user.id),
+            })
+            .select()
+            .single();
+        if (generation != _authGeneration) return;
+        loadedProfile = UserProfile.fromMap(_asMap(row));
+      } else {
+        loadedProfile = UserProfile.fromMap(_asMap(profileRow));
+      }
+      profile = loadedProfile;
+
+      final membership = await _client
+          .from('circle_members')
+          .select('circle_id')
+          .eq('user_id', user.id)
+          .maybeSingle();
+      if (generation != _authGeneration) return;
+
+      if (membership == null) {
+        circle = null;
+        _members = [];
+        _places = [];
+        _messages = [];
+        _alerts = [];
+        phase = AppPhase.setup;
+        notifyListeners();
+        return;
+      }
+
+      final circleRow = await _client
+          .from('circles')
+          .select()
+          .eq('id', membership['circle_id'] as String)
+          .single();
+      if (generation != _authGeneration) return;
+      circle = Circle.fromMap(_asMap(circleRow));
+
+      await _loadCircleData();
+      if (generation != _authGeneration) return;
+
+      _subscribeRealtime();
+      phase = AppPhase.ready;
+      notifyListeners();
+      unawaited(_startLocationUpdates());
+    } catch (error) {
+      if (generation != _authGeneration) return;
+      startupError = friendlyError(error);
+      phase = AppPhase.error;
+      notifyListeners();
+    }
+  }
+
+  String _fallbackName(User user) {
+    final metadataName = user.userMetadata?['display_name'];
+    if (metadataName is String && metadataName.trim().isNotEmpty) {
+      return metadataName.trim();
+    }
+    final email = user.email;
+    if (email != null && email.contains('@')) {
+      return email.split('@').first;
+    }
+    return 'Locmate user';
+  }
+
+  int _fallbackColor(String id) =>
+      id.codeUnits.fold<int>(0, (sum, value) => sum + value) % 5;
+
+  Future<void> signIn({required String email, required String password}) async {
+    await _client.auth.signInWithPassword(
+      email: email.trim(),
+      password: password,
+    );
+    if (phase == AppPhase.signedOut || phase == AppPhase.loading) {
+      await _loadSession();
+    }
+  }
+
+  /// Returns true when a session was created immediately. When Supabase has
+  /// email confirmation enabled, false means the user must confirm by email
+  /// before signing in.
+  Future<bool> signUp({
+    required String name,
+    required String email,
+    required String password,
+  }) async {
+    final response = await _client.auth.signUp(
+      email: email.trim(),
+      password: password,
+      data: {'display_name': name.trim()},
+    );
+    if (response.session != null &&
+        (phase == AppPhase.signedOut || phase == AppPhase.loading)) {
+      await _loadSession();
+    }
+    return response.session != null;
+  }
+
+  Future<void> signOut() async {
+    await SubscriptionService.instance.logOut();
+    await _client.auth.signOut();
+    _handleSignedOut();
+  }
+
+  /// Permanently deletes the account and its data (Settings → Delete account).
+  Future<void> deleteAccount() async {
+    await _client.rpc('delete_account');
+    await SubscriptionService.instance.logOut();
+    try {
+      await _client.auth.signOut();
+    } catch (_) {
+      // The user no longer exists; the local session is cleared below anyway.
+    }
+    _handleSignedOut();
+  }
+
+  Future<void> _loadPlan() async {
+    final activeCircle = circle;
+    if (activeCircle == null) return;
+    try {
+      final plan = _asMap(
+        await _client.rpc(
+          'circle_plan',
+          params: {'p_circle_id': activeCircle.id},
+        ),
+      );
+      circlePremium = plan['circle_premium'] as bool? ?? false;
+      userPremium = plan['user_premium'] as bool? ?? false;
+    } catch (_) {
+      // Keep the last known plan; the server still enforces limits.
+    }
+  }
+
+  /// Re-reads the plan after a purchase. The RevenueCat webhook updates
+  /// Supabase a few seconds after the store confirms, so retry briefly.
+  Future<void> refreshPlan({bool waitForPremium = false}) async {
+    for (var attempt = 0; attempt < (waitForPremium ? 6 : 1); attempt++) {
+      await _loadPlan();
+      notifyListeners();
+      if (!waitForPremium || userPremium) return;
+      await Future<void>.delayed(const Duration(seconds: 2));
+    }
+  }
+
+  /// Opens the system browser for Google sign-in. The session arrives through
+  /// the [SupabaseConfig.authRedirectUrl] deep link and is picked up by the
+  /// auth state listener. Returns false when the browser could not be opened.
+  Future<bool> signInWithGoogle() {
+    return _client.auth.signInWithOAuth(
+      OAuthProvider.google,
+      redirectTo: SupabaseConfig.authRedirectUrl,
+      scopes: 'email profile',
+      authScreenLaunchMode: LaunchMode.externalApplication,
+    );
+  }
+
+  void _handleSignedOut() {
+    _authGeneration++;
+    _positionSub?.cancel();
+    _positionSub = null;
+    _channel?.unsubscribe();
+    _channel = null;
+    selectedMemberId = null;
+    profile = null;
+    circle = null;
+    currentPosition = null;
+    _members = [];
+    _places = [];
+    _messages = [];
+    _alerts = [];
+    circlePremium = false;
+    userPremium = false;
+    phase = AppPhase.signedOut;
+    startupError = null;
+    syncError = null;
+    locationError = null;
     notifyListeners();
   }
 
-  void selectMember(String? id) {
-    if (selectedMemberId == id) return;
-    selectedMemberId = id;
+  Future<void> retry() async {
+    phase = AppPhase.loading;
+    startupError = null;
     notifyListeners();
+    await _loadSession();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Circle setup
+  // ---------------------------------------------------------------------------
+
+  Future<void> createCircle(String name) async {
+    final data = await _client.rpc(
+      'create_circle',
+      params: {'p_name': name.trim()},
+    );
+    await _enterCircle(Circle.fromMap(_asMap(data)));
+  }
+
+  Future<void> joinCircle(String code) async {
+    final data = await _client.rpc(
+      'join_circle',
+      params: {'p_invite_code': code.trim().toUpperCase()},
+    );
+    await _enterCircle(Circle.fromMap(_asMap(data)));
+  }
+
+  Future<void> _enterCircle(Circle joinedCircle) async {
+    circle = joinedCircle;
+    await _loadCircleData();
+    _subscribeRealtime();
+    phase = AppPhase.ready;
+    refreshMaybe();
+    unawaited(_startLocationUpdates());
+  }
+
+  Future<void> leaveCircle() async {
+    await _client.rpc('leave_circle');
+    _positionSub?.cancel();
+    _positionSub = null;
+    _channel?.unsubscribe();
+    _channel = null;
+    circle = null;
+    _members = [];
+    _places = [];
+    _messages = [];
+    _alerts = [];
+    selectedMemberId = null;
+    _geofencePrimed = false;
+    phase = AppPhase.setup;
+    notifyListeners();
+  }
+
+  void refreshMaybe() {
+    if (!_disposed) notifyListeners();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Loading data
+  // ---------------------------------------------------------------------------
+
+  Future<void> _loadCircleData() async {
+    final activeCircle = circle;
+    final me = userId;
+    if (activeCircle == null || me == null) return;
+
+    final memberRows = _asMapList(
+      await _client
+          .from('circle_members')
+          .select('user_id, joined_at')
+          .eq('circle_id', activeCircle.id),
+    );
+    final memberIds = memberRows
+        .map((row) => row['user_id'] as String)
+        .toList(growable: false);
+
+    if (memberIds.isEmpty) {
+      _members = [];
+    } else {
+      final profileRows = _asMapList(
+        await _client.from('profiles').select().inFilter('id', memberIds),
+      );
+      final locationRows = _asMapList(
+        await _client
+            .from('locations')
+            .select()
+            .eq('circle_id', activeCircle.id),
+      );
+      final locations = {
+        for (final row in locationRows) row['user_id'] as String: row,
+      };
+
+      final builtMembers = <Member>[];
+      for (final memberRow in memberRows) {
+        final id = memberRow['user_id'] as String;
+        Map<String, dynamic>? profileRow;
+        for (final row in profileRows) {
+          if (row['id'] == id) {
+            profileRow = row;
+            break;
+          }
+        }
+        if (profileRow == null) continue;
+        final member = Member(
+          id: id,
+          name: profileRow['display_name'] as String? ?? 'Locmate user',
+          colorIndex: (profileRow['color_index'] as num?)?.toInt() ?? 0,
+          isCurrentUser: id == me,
+          isOwner: id == activeCircle.ownerId,
+        );
+        final location = locations[id];
+        if (location != null) _applyLocation(member, location);
+        builtMembers.add(member);
+      }
+      builtMembers.sort((a, b) {
+        if (a.isCurrentUser != b.isCurrentUser) {
+          return a.isCurrentUser ? -1 : 1;
+        }
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+      _members = builtMembers;
+
+      final currentMember = currentUserOrNull;
+      if (currentMember != null) {
+        sharingEnabled = currentMember.isSharing;
+        if (currentPosition != null) {
+          currentMember.position = currentPosition;
+          currentMember.lastUpdated = DateTime.now();
+        }
+      }
+    }
+
+    _places = _asMapList(
+      await _client
+          .from('places')
+          .select()
+          .eq('circle_id', activeCircle.id)
+          .order('created_at'),
+    ).map(Place.fromMap).toList();
+
+    await _loadPlan();
+
+    final messageRows = _asMapList(
+      await _client
+          .from('messages')
+          .select()
+          .eq('circle_id', activeCircle.id)
+          .order('created_at', ascending: false)
+          .limit(100),
+    );
+    _messages = messageRows.map(ChatMessage.fromMap).toList()
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+    final alertRows = _asMapList(
+      await _client
+          .from('alerts')
+          .select()
+          .eq('circle_id', activeCircle.id)
+          .order('created_at', ascending: false)
+          .limit(100),
+    );
+    _alerts = alertRows
+        .map(
+          (row) => AlertEvent.fromMap(
+            row,
+            memberName:
+                memberById(row['member_id'] as String?)?.name ?? 'Member',
+          ),
+        )
+        .toList();
+    _geofencePrimed = false;
+  }
+
+  void _applyLocation(Member member, Map<String, dynamic> location) {
+    final isSharing = location['is_sharing'] as bool? ?? true;
+    member.isSharing = isSharing;
+    member.battery = (location['battery'] as num?)?.toDouble();
+    var updatedAt = DateTime.now();
+    final rawUpdatedAt = location['updated_at'];
+    if (rawUpdatedAt is String) {
+      updatedAt = DateTime.parse(rawUpdatedAt).toLocal();
+    }
+    member.lastUpdated = updatedAt;
+
+    if (!isSharing ||
+        location['latitude'] == null ||
+        location['longitude'] == null) {
+      member.position = null;
+      member.accuracy = null;
+      member.heading = null;
+      member.speed = 0;
+      return;
+    }
+
+    member.position = LatLng(
+      (location['latitude'] as num).toDouble(),
+      (location['longitude'] as num).toDouble(),
+    );
+    member.accuracy = (location['accuracy'] as num?)?.toDouble();
+    member.heading = (location['heading'] as num?)?.toDouble();
+    member.speed = (location['speed'] as num?)?.toDouble() ?? 0;
+  }
+
+  Future<void> refreshData() async {
+    if (phase != AppPhase.ready || circle == null) return;
+    refreshing = true;
+    notifyListeners();
+    try {
+      await _loadCircleData();
+      syncError = null;
+    } catch (error) {
+      syncError = friendlyError(error);
+    } finally {
+      refreshing = false;
+      notifyListeners();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Realtime
+  // ---------------------------------------------------------------------------
+
+  void _subscribeRealtime() {
+    final activeCircle = circle;
+    if (activeCircle == null) return;
+    _channel?.unsubscribe();
+    final filter = PostgresChangeFilter(
+      type: PostgresChangeFilterType.eq,
+      column: 'circle_id',
+      value: activeCircle.id,
+    );
+
+    final channel = _client.channel(
+      'circle:${activeCircle.id}:${DateTime.now().microsecondsSinceEpoch}',
+    );
+    channel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'locations',
+          filter: filter,
+          callback: _handleLocationChange,
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'messages',
+          filter: filter,
+          callback: _handleMessageChange,
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'alerts',
+          filter: filter,
+          callback: _handleAlertChange,
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'places',
+          filter: filter,
+          callback: (_) => unawaited(_reloadPlaces()),
+        )
+        .subscribe();
+    _channel = channel;
+  }
+
+  void _handleLocationChange(PostgresChangePayload payload) {
+    if (payload.eventType == PostgresChangeEvent.delete) return;
+    final record = payload.newRecord;
+    final member = memberById(record['user_id'] as String?);
+    if (member == null || member.isCurrentUser) return;
+    _applyLocation(member, record);
+    notifyListeners();
+  }
+
+  void _handleMessageChange(PostgresChangePayload payload) {
+    _addMessage(ChatMessage.fromMap(payload.newRecord));
+    notifyListeners();
+  }
+
+  void _handleAlertChange(PostgresChangePayload payload) {
+    final record = payload.newRecord;
+    _addAlert(
+      AlertEvent.fromMap(
+        record,
+        memberName:
+            memberById(record['member_id'] as String?)?.name ?? 'Member',
+      ),
+    );
+    notifyListeners();
+  }
+
+  Future<void> _reloadPlaces() async {
+    final activeCircle = circle;
+    if (activeCircle == null) return;
+    try {
+      final rows = _asMapList(
+        await _client
+            .from('places')
+            .select()
+            .eq('circle_id', activeCircle.id)
+            .order('created_at'),
+      );
+      _places = rows.map(Place.fromMap).toList();
+      notifyListeners();
+    } catch (error) {
+      syncError = friendlyError(error);
+      notifyListeners();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Location tracking
+  // ---------------------------------------------------------------------------
+
+  LocationAccuracy get _accuracy =>
+      batterySaver ? LocationAccuracy.medium : LocationAccuracy.high;
+  int get _distanceFilter => batterySaver ? 50 : 15;
+
+  /// Settings for a single position fix (never starts a background service).
+  LocationSettings get _locationSettings =>
+      LocationSettings(accuracy: _accuracy, distanceFilter: _distanceFilter);
+
+  /// Settings for the continuous stream. On Android this runs a foreground
+  /// service with a persistent notification and on iOS it enables background
+  /// location updates, so the circle keeps seeing you while the app is closed.
+  LocationSettings get _streamSettings {
+    if (kIsWeb) return _locationSettings;
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+        return AndroidSettings(
+          accuracy: _accuracy,
+          distanceFilter: _distanceFilter,
+          intervalDuration: Duration(seconds: batterySaver ? 60 : 15),
+          foregroundNotificationConfig: const ForegroundNotificationConfig(
+            notificationTitle: 'Locmate is sharing your location',
+            notificationText:
+                'Your circle can see where you are. Pause sharing in Settings.',
+            notificationChannelName: 'Location sharing',
+            enableWakeLock: true,
+            setOngoing: true,
+          ),
+        );
+      case TargetPlatform.iOS:
+        return AppleSettings(
+          accuracy: _accuracy,
+          distanceFilter: _distanceFilter,
+          activityType: ActivityType.other,
+          pauseLocationUpdatesAutomatically: batterySaver,
+          allowBackgroundLocationUpdates: true,
+          showBackgroundLocationIndicator: true,
+        );
+      case TargetPlatform.macOS:
+        return AppleSettings(
+          accuracy: _accuracy,
+          distanceFilter: _distanceFilter,
+        );
+      default:
+        return _locationSettings;
+    }
+  }
+
+  Future<void> _startLocationUpdates() async {
+    if (_disposed || phase != AppPhase.ready || circle == null) return;
+    if (!sharingEnabled) {
+      await _stopLocationUpdates();
+      return;
+    }
+    try {
+      locationServiceDisabled = !await Geolocator.isLocationServiceEnabled();
+      if (locationServiceDisabled) {
+        locationError = 'Location services are turned off for this device.';
+        notifyListeners();
+        return;
+      }
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      // iOS: after "While using", ask once more so iOS can offer "Always".
+      if (!kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.iOS &&
+          permission == LocationPermission.whileInUse &&
+          !_askedForAlways) {
+        _askedForAlways = true;
+        permission = await Geolocator.requestPermission();
+      }
+      backgroundLocationLimited =
+          permission == LocationPermission.whileInUse &&
+          !kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.iOS;
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        locationPermissionDenied = true;
+        locationError = permission == LocationPermission.deniedForever
+            ? 'Location access is blocked. Enable it in system settings.'
+            : 'Location access is needed to share your position.';
+        notifyListeners();
+        return;
+      }
+
+      locationPermissionDenied = false;
+      locationServiceDisabled = false;
+      locationError = null;
+      notifyListeners();
+
+      await _positionSub?.cancel();
+      _positionSub = null;
+
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: _locationSettings,
+      );
+      await _handlePosition(position, forcePublish: true);
+
+      _positionSub =
+          Geolocator.getPositionStream(
+            locationSettings: _streamSettings,
+          ).listen((position) {
+            unawaited(_handlePosition(position));
+          });
+    } catch (error) {
+      locationError =
+          'Could not start location updates. '
+          '${friendlyError(error)}';
+      notifyListeners();
+    }
+  }
+
+  Future<void> _stopLocationUpdates() async {
+    await _positionSub?.cancel();
+    _positionSub = null;
+  }
+
+  Future<void> _handlePosition(
+    Position position, {
+    bool forcePublish = false,
+  }) async {
+    if (_disposed || circle == null) return;
+    final point = LatLng(position.latitude, position.longitude);
+    currentPosition = point;
+    _lastPosition = point;
+    lastKnownPosition = point;
+    _saveLastLocation(point);
+
+    final me = currentUserOrNull;
+    if (me != null) {
+      me.position = sharingEnabled ? point : null;
+      me.accuracy = sharingEnabled ? position.accuracy : null;
+      me.heading = sharingEnabled && position.heading >= 0
+          ? position.heading
+          : null;
+      me.speed = sharingEnabled && position.speed >= 0 ? position.speed : 0;
+      me.lastUpdated = DateTime.now();
+      me.isSharing = sharingEnabled;
+    }
+    notifyListeners();
+
+    if (sharingEnabled) {
+      final movedFarEnough =
+          _lastPublishedPosition == null ||
+          distanceMeters(_lastPublishedPosition!, point) >=
+              _publishDistanceMeters;
+      final intervalPassed =
+          _lastPublishAt == null ||
+          DateTime.now().difference(_lastPublishAt!) >= _publishInterval;
+      if (forcePublish || movedFarEnough || intervalPassed) {
+        await _publishLocation(point, force: true);
+      }
+      await _checkGeofences(point);
+    }
+  }
+
+  Future<void> _publishLocation(LatLng point, {bool force = false}) async {
+    if (_publishingLocation || circle == null || userId == null) return;
+    _publishingLocation = true;
+    try {
+      final batteryLevel = await _readBatteryLevel();
+      _maybeAlertBattery(batteryLevel);
+      final now = DateTime.now().toUtc();
+      await _client.from('locations').upsert({
+        'user_id': userId,
+        'circle_id': circle!.id,
+        'latitude': point.latitude,
+        'longitude': point.longitude,
+        'accuracy': currentUserOrNull?.accuracy,
+        'heading': currentUserOrNull?.heading,
+        'speed': currentUserOrNull?.speed ?? 0,
+        'battery': batteryLevel,
+        'is_sharing': true,
+        'updated_at': now.toIso8601String(),
+      }, onConflict: 'user_id');
+      _lastPublishAt = DateTime.now();
+      _lastPublishedPosition = point;
+      if (syncError != null) {
+        syncError = null;
+        notifyListeners();
+      }
+    } catch (error) {
+      syncError = friendlyError(error);
+      notifyListeners();
+    } finally {
+      _publishingLocation = false;
+    }
+  }
+
+  Future<void> _publishPaused() async {
+    if (circle == null || userId == null) return;
+    try {
+      final batteryLevel = await _readBatteryLevel();
+      await _client.from('locations').upsert({
+        'user_id': userId,
+        'circle_id': circle!.id,
+        'latitude': null,
+        'longitude': null,
+        'accuracy': null,
+        'heading': null,
+        'speed': 0,
+        'battery': batteryLevel,
+        'is_sharing': false,
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      }, onConflict: 'user_id');
+      _lastPublishAt = null;
+      _lastPublishedPosition = null;
+    } catch (error) {
+      syncError = friendlyError(error);
+      notifyListeners();
+    }
+  }
+
+  Future<int?> _readBatteryLevel() async {
+    try {
+      return await _battery.batteryLevel;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _maybeAlertBattery(int? level) {
+    if (level == null || !sharingEnabled || !circlePremium) return;
+    if (level > 20) {
+      _batteryAlerted = false;
+      return;
+    }
+    if (_batteryAlerted) return;
+    _batteryAlerted = true;
+    final me = currentUserOrNull;
+    if (me == null) return;
+    unawaited(
+      _insertAlert(
+        type: AlertType.battery,
+        title: "${me.firstName}'s battery is low",
+        body: '$level% remaining · consider charging',
+      ),
+    );
+  }
+
+  Future<void> _checkGeofences(LatLng point) async {
+    final me = currentUserOrNull;
+    if (me == null) return;
+
+    Place? inside;
+    for (final place in _places) {
+      if (distanceMeters(point, place.point) <= place.radiusMeters) {
+        inside = place;
+        break;
+      }
+    }
+
+    final previousId = _lastPlaceId;
+    final newId = inside?.id;
+    if (!_geofencePrimed) {
+      _geofencePrimed = true;
+      _lastPlaceId = newId;
+      return;
+    }
+    if (newId == previousId) return;
+    _lastPlaceId = newId;
+
+    final previous = placeById(previousId);
+    if (previous != null) {
+      await _insertAlert(
+        type: AlertType.departure,
+        title: '${me.firstName} left ${previous.name}',
+        body: 'Left ${previous.displayAddress}',
+      );
+    }
+    if (inside != null) {
+      await _insertAlert(
+        type: AlertType.arrival,
+        title: '${me.firstName} arrived at ${inside.name}',
+        body: 'Arrived at ${inside.displayAddress}',
+      );
+    }
+  }
+
+  Future<void> _insertAlert({
+    required AlertType type,
+    required String title,
+    required String body,
+  }) async {
+    final me = currentUserOrNull;
+    if (me == null || circle == null) return;
+    try {
+      final row = await _client
+          .from('alerts')
+          .insert({
+            'circle_id': circle!.id,
+            'member_id': me.id,
+            'type': type.name,
+            'title': title,
+            'body': body,
+          })
+          .select()
+          .single();
+      _addAlert(AlertEvent.fromMap(_asMap(row), memberName: me.name));
+      notifyListeners();
+    } catch (error) {
+      syncError = friendlyError(error);
+      notifyListeners();
+    }
+  }
+
+  Future<void> refreshMyLocation() async {
+    if (phase != AppPhase.ready) return;
+    await _startLocationUpdates();
+  }
+
+  Future<void> refreshMemberLocation(String memberId) async {
+    final member = memberById(memberId);
+    if (member == null) return;
+    if (member.isCurrentUser) {
+      await refreshMyLocation();
+      return;
+    }
+    try {
+      final row = await _client
+          .from('locations')
+          .select()
+          .eq('user_id', memberId)
+          .maybeSingle();
+      if (row != null) _applyLocation(member, _asMap(row));
+      notifyListeners();
+    } catch (error) {
+      syncError = friendlyError(error);
+      notifyListeners();
+    }
+  }
+
+  Future<void> openSystemLocationSettings() async {
+    if (locationPermissionDenied) {
+      await Geolocator.openAppSettings();
+    } else {
+      await Geolocator.openLocationSettings();
+    }
+    await _startLocationUpdates();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Settings
+  // ---------------------------------------------------------------------------
+
+  void _loadSettings() {
+    final raw = _prefs?.getString(_settingsKey);
+    if (raw == null) return;
+    try {
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      darkMode = decoded['darkMode'] as bool? ?? false;
+      mapDark = decoded['mapDark'] as bool? ?? false;
+      batterySaver = decoded['batterySaver'] as bool? ?? false;
+    } catch (_) {
+      // Ignore malformed preferences and keep defaults.
+    }
+  }
+
+  void _saveSettings() {
+    _prefs?.setString(
+      _settingsKey,
+      jsonEncode({
+        'darkMode': darkMode,
+        'mapDark': mapDark,
+        'batterySaver': batterySaver,
+      }),
+    );
   }
 
   void toggleSharing() {
     sharingEnabled = !sharingEnabled;
-    _saveSettings();
+    final me = currentUserOrNull;
+    if (me != null) {
+      me.isSharing = sharingEnabled;
+      if (!sharingEnabled) {
+        me.position = null;
+        me.speed = 0;
+      } else if (_lastPosition != null) {
+        me.position = _lastPosition;
+        me.lastUpdated = DateTime.now();
+      }
+    }
+    if (!sharingEnabled) {
+      _lastPublishedPosition = null;
+      _lastPublishAt = null;
+    }
     notifyListeners();
-  }
-
-  void setNotifications(bool value) {
-    notificationsEnabled = value;
-    _saveSettings();
-    notifyListeners();
-  }
-
-  void setBatterySaver(bool value) {
-    batterySaver = value;
-    _saveSettings();
-    notifyListeners();
+    if (sharingEnabled) {
+      final point = _lastPosition ?? currentPosition;
+      if (point != null) {
+        unawaited(_publishLocation(point, force: true));
+      }
+      unawaited(_startLocationUpdates());
+    } else {
+      unawaited(_stopLocationUpdates());
+      unawaited(_publishPaused());
+    }
   }
 
   void setDarkMode(bool value) {
@@ -174,545 +1212,190 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void renameSelf(String name) {
+  void setBatterySaver(bool value) {
+    batterySaver = value;
+    _saveSettings();
+    notifyListeners();
+    _positionSub?.cancel();
+    _positionSub = null;
+    unawaited(_startLocationUpdates());
+  }
+
+  void selectMember(String? id) {
+    if (selectedMemberId == id) return;
+    selectedMemberId = id;
+    notifyListeners();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Profile, places, chat and SOS
+  // ---------------------------------------------------------------------------
+
+  Future<void> renameSelf(String name) async {
     final trimmed = name.trim();
-    if (trimmed.isEmpty) return;
-    currentUser.name = trimmed;
+    if (trimmed.isEmpty || profile == null) return;
+    await _client
+        .from('profiles')
+        .update({'display_name': trimmed})
+        .eq('id', profile!.id);
+    profile = UserProfile(
+      id: profile!.id,
+      displayName: trimmed,
+      colorIndex: profile!.colorIndex,
+    );
+    currentUserOrNull?.name = trimmed;
     notifyListeners();
   }
 
-  void touchMemberLocation(String memberId) {
-    final member = memberById(memberId);
-    if (member == null) return;
-    member.lastUpdated = DateTime.now();
-    notifyListeners();
-  }
-
-  void addPlace({
+  Future<void> addPlace({
     required String name,
     required String category,
     required String address,
     required LatLng point,
     required double radiusMeters,
-  }) {
-    _places.add(Place(
-      id: 'place_${DateTime.now().microsecondsSinceEpoch}',
-      name: name.trim(),
-      address: address,
-      icon: category,
-      point: point,
-      radiusMeters: radiusMeters,
-    ));
-    _savePlaces();
+  }) async {
+    if (circle == null) throw StateError('Join a circle before adding places.');
+    if (!canAddPlace) {
+      throw StateError(
+        'The Free plan includes ${PlanLimits.freePlaces} places. '
+        'Upgrade to Premium for unlimited places.',
+      );
+    }
+    final row = await _client
+        .from('places')
+        .insert({
+          'circle_id': circle!.id,
+          'name': name.trim(),
+          'address': address.trim(),
+          'icon': category,
+          'latitude': point.latitude,
+          'longitude': point.longitude,
+          'radius_meters': radiusMeters.round(),
+          'created_by': userId,
+        })
+        .select()
+        .single();
+    final place = Place.fromMap(_asMap(row));
+    if (!_places.any((existing) => existing.id == place.id)) {
+      _places.add(place);
+    }
     notifyListeners();
   }
 
-  void removePlace(String id) {
+  Future<void> removePlace(String id) async {
+    await _client.from('places').delete().eq('id', id);
     _places.removeWhere((place) => place.id == id);
-    for (final member in _members) {
-      if (member.currentPlaceId == id) member.currentPlaceId = null;
-    }
-    _savePlaces();
     notifyListeners();
   }
 
-  void sendMessage(String text) {
+  Future<void> sendMessage(String text) async {
     final trimmed = text.trim();
-    if (trimmed.isEmpty) return;
-    _messages.add(ChatMessage(
-      id: 'msg_${_messageCounter++}',
-      senderId: currentUser.id,
-      text: trimmed,
-      timestamp: DateTime.now(),
-    ));
+    if (trimmed.isEmpty || circle == null) return;
+    final row = await _client
+        .from('messages')
+        .insert({
+          'id': _uuid.v4(),
+          'circle_id': circle!.id,
+          'sender_id': userId,
+          'body': trimmed,
+        })
+        .select()
+        .single();
+    _addMessage(ChatMessage.fromMap(_asMap(row)));
     notifyListeners();
-    _replyTimer?.cancel();
-    _replyTimer = Timer(const Duration(milliseconds: 1800), _simulateReply);
   }
 
-  void sendSos() {
-    _addAlert(AlertEvent(
-      id: _nextAlertId(),
-      memberId: currentUser.id,
-      memberName: currentUser.name,
+  Future<void> sendSos() async {
+    final me = currentUserOrNull;
+    if (me == null) throw StateError('Your profile is still loading.');
+    await _insertAlert(
       type: AlertType.sos,
-      title: '${currentUser.firstName} sent an SOS alert',
-      body: 'Emergency assistance requested · circle notified',
-      timestamp: DateTime.now(),
-    ));
-    notifyListeners();
-  }
-
-  void resetDemo() {
-    _members.clear();
-    _alerts.clear();
-    _messages.clear();
-    _places = _defaultPlaces();
-    selectedMemberId = null;
-    _savePlaces();
-    _seedMembers();
-    _seedAlerts();
-    _seedMessages();
-    _syncInitialPlaces();
-    circleUpdatedAt = DateTime.now();
-    notifyListeners();
-  }
-
-  void _tick() {
-    if (_disposed) return;
-    _tickCount++;
-    for (final member in _members) {
-      if (member.dwellTicks > 0) {
-        member.dwellTicks--;
-        member.motion = MotionState.stationary;
-        member.speedMph = 0;
-      } else {
-        _advanceMember(member);
-      }
-      _drainBattery(member);
-      member.lastUpdated = DateTime.now();
-    }
-    _checkGeofences();
-    circleUpdatedAt = DateTime.now();
-    notifyListeners();
-  }
-
-  void _advanceMember(Member member) {
-    final isDriving = member.travelMode == TravelMode.driving;
-    final speedFactor = isDriving ? 4.5 : 7.0;
-    final baseSpeed = isDriving ? 12.0 : 1.5;
-    var remaining = baseSpeed * speedFactor * 3;
-
-    var guard = 0;
-    while (remaining > 0.01 && guard < 60) {
-      guard++;
-      final from = member.route[member.legIndex];
-      final to = member.route[(member.legIndex + 1) % member.route.length];
-      final legMeters = distanceMeters(from, to);
-      if (legMeters < 1) {
-        member.legIndex = (member.legIndex + 1) % member.route.length;
-        member.legT = 0;
-        continue;
-      }
-      final left = legMeters * (1 - member.legT);
-      if (remaining < left) {
-        member.legT += remaining / legMeters;
-        remaining = 0;
-      } else {
-        remaining -= left;
-        member.legIndex = (member.legIndex + 1) % member.route.length;
-        member.legT = 0;
-      }
-    }
-
-    final from = member.route[member.legIndex];
-    final to = member.route[(member.legIndex + 1) % member.route.length];
-    member.position = LatLng(
-      from.latitude + (to.latitude - from.latitude) * member.legT,
-      from.longitude + (to.longitude - from.longitude) * member.legT,
+      title: '${me.firstName} sent an SOS alert',
+      body: 'Emergency assistance requested · $circleName notified',
     );
-    member.motion =
-        isDriving ? MotionState.driving : MotionState.walking;
-    final wobble =
-        sin((_tickCount + member.id.length * 3) / 2.4) * 2.5;
-    member.speedMph = isDriving
-        ? baseSpeed * 2.237 + wobble
-        : baseSpeed * 2.237 + wobble.abs();
-  }
-
-  void _drainBattery(Member member) {
-    final base = member.motion == MotionState.driving
-        ? 0.075
-        : member.motion == MotionState.walking
-            ? 0.05
-            : 0.025;
-    final drain = base * (batterySaver ? 0.45 : 1.0);
-    final before = member.battery;
-    member.battery = max(4.0, member.battery - drain);
-    if (before > 20 && member.battery <= 20 && !member.lowBatteryAlerted) {
-      member.lowBatteryAlerted = true;
-      _addAlert(AlertEvent(
-        id: _nextAlertId(),
-        memberId: member.id,
-        memberName: member.name,
-        type: AlertType.battery,
-        title: "${member.firstName}'s battery is low",
-        body: '${member.battery.round()}% remaining · consider charging',
-        timestamp: DateTime.now(),
-      ));
+    if (sharingEnabled && _lastPosition != null) {
+      await _publishLocation(_lastPosition!, force: true);
     }
   }
 
-  void _checkGeofences() {
-    for (final member in _members) {
-      Place? inside;
-      for (final place in _places) {
-        if (distanceMeters(member.position, place.point) <=
-            place.radiusMeters) {
-          inside = place;
-          break;
-        }
-      }
-      final newId = inside?.id;
-      if (newId == member.currentPlaceId) continue;
-
-      final previous = placeById(member.currentPlaceId);
-      member.currentPlaceId = newId;
-
-      if (previous != null) {
-        _addAlert(AlertEvent(
-          id: _nextAlertId(),
-          memberId: member.id,
-          memberName: member.name,
-          type: AlertType.departure,
-          title: '${member.firstName} left ${previous.name}',
-          body: 'Left ${previous.address}',
-          timestamp: DateTime.now(),
-        ));
-      }
-      if (inside != null) {
-        if (member.dwellTicks == 0) {
-          member.dwellTicks = 6 + _random.nextInt(7);
-        }
-        _addAlert(AlertEvent(
-          id: _nextAlertId(),
-          memberId: member.id,
-          memberName: member.name,
-          type: AlertType.arrival,
-          title: '${member.firstName} arrived at ${inside.name}',
-          body: 'Arrived at ${inside.address}',
-          timestamp: DateTime.now(),
-        ));
-      }
+  void _addMessage(ChatMessage message) {
+    if (_messages.any((existing) => existing.id == message.id)) return;
+    _messages.add(message);
+    _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    if (_messages.length > 200) {
+      _messages.removeRange(0, _messages.length - 200);
     }
   }
 
   void _addAlert(AlertEvent alert) {
+    if (_alerts.any((existing) => existing.id == alert.id)) return;
     _alerts.add(alert);
-    if (_alerts.length > 60) {
-      _alerts.removeRange(0, _alerts.length - 60);
+    _alerts.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    if (_alerts.length > 100) {
+      _alerts.removeRange(100, _alerts.length);
     }
   }
 
-  String _nextAlertId() =>
-      'alert_${DateTime.now().microsecondsSinceEpoch}_${_alerts.length}';
+  // ---------------------------------------------------------------------------
+  // Persistence helpers
+  // ---------------------------------------------------------------------------
 
-  void _simulateReply() {
-    if (_disposed || !isReady) return;
-    final others =
-        _members.where((member) => !member.isCurrentUser).toList();
-    if (others.isEmpty) return;
-    final sender = others[_random.nextInt(others.length)];
-    const replies = [
-      'Got it, thanks!',
-      'On my way.',
-      'Sounds good.',
-      'Just left, be home soon.',
-      'Can you pick up milk on the way?',
-      'Okay, see you then.',
-      'I will check the map.',
-    ];
-    _messages.add(ChatMessage(
-      id: 'msg_${_messageCounter++}',
-      senderId: sender.id,
-      text: replies[_random.nextInt(replies.length)],
-      timestamp: DateTime.now(),
-    ));
-    notifyListeners();
-  }
-
-  List<Place> _defaultPlaces() => [
-        const Place(
-          id: 'home',
-          name: 'Home',
-          address: '148 Willow Creek Rd',
-          icon: 'home',
-          point: LatLng(30.2705, -97.7442),
-          radiusMeters: 200,
-        ),
-        Place(
-          id: 'work',
-          name: 'Work',
-          address: '2400 Commerce Center Dr',
-          icon: 'work',
-          point: LatLng(30.2632, -97.7388),
-          radiusMeters: 200,
-        ),
-        Place(
-          id: 'school',
-          name: 'Oakwood High',
-          address: '700 Oakwood High Blvd',
-          icon: 'school',
-          point: LatLng(30.2743, -97.7361),
-          radiusMeters: 220,
-        ),
-        Place(
-          id: 'gym',
-          name: 'FitZone Gym',
-          address: '88 Riverside Ave',
-          icon: 'gym',
-          point: LatLng(30.2608, -97.7475),
-          radiusMeters: 150,
-        ),
-      ];
-
-  void _seedMembers() {
-    const home = LatLng(30.2705, -97.7442);
-    const work = LatLng(30.2632, -97.7388);
-    const school = LatLng(30.2743, -97.7361);
-    const gym = LatLng(30.2608, -97.7475);
-    final palette = LocmateColors.memberPalette;
-
-    _members.addAll([
-      Member(
-        id: 'alex',
-        name: 'Alex Carter',
-        color: palette[0],
-        travelMode: TravelMode.driving,
-        isCurrentUser: true,
-        isOwner: true,
-        battery: 78,
-        dwellTicks: 2,
-        route: const [
-          work,
-          LatLng(30.2652, -97.7415),
-          LatLng(30.2680, -97.7436),
-          home,
-          LatLng(30.2692, -97.7452),
-          LatLng(30.2665, -97.7420),
-          LatLng(30.2643, -97.7401),
-        ],
-      ),
-      Member(
-        id: 'maria',
-        name: 'Maria Carter',
-        color: palette[1],
-        travelMode: TravelMode.driving,
-        battery: 63,
-        legIndex: 6,
-        dwellTicks: 4,
-        route: const [
-          home,
-          LatLng(30.2692, -97.7418),
-          LatLng(30.2668, -97.7404),
-          work,
-          LatLng(30.2640, -97.7420),
-          LatLng(30.2620, -97.7445),
-          gym,
-          LatLng(30.2642, -97.7460),
-          LatLng(30.2672, -97.7455),
-          LatLng(30.2694, -97.7449),
-        ],
-      ),
-      Member(
-        id: 'ethan',
-        name: 'Ethan Carter',
-        color: palette[2],
-        travelMode: TravelMode.driving,
-        battery: 51,
-        legIndex: 7,
-        dwellTicks: 4,
-        route: const [
-          school,
-          LatLng(30.2720, -97.7390),
-          LatLng(30.2690, -97.7395),
-          LatLng(30.2662, -97.7412),
-          gym,
-          LatLng(30.2660, -97.7440),
-          LatLng(30.2685, -97.7445),
-          home,
-          LatLng(30.2715, -97.7420),
-          LatLng(30.2735, -97.7385),
-        ],
-      ),
-      Member(
-        id: 'lily',
-        name: 'Lily Carter',
-        color: palette[3],
-        travelMode: TravelMode.walking,
-        battery: 20.4,
-        legIndex: 3,
-        dwellTicks: 5,
-        route: const [
-          home,
-          LatLng(30.2712, -97.7420),
-          LatLng(30.2726, -97.7398),
-          school,
-          LatLng(30.2725, -97.7378),
-          LatLng(30.2708, -97.7402),
-          LatLng(30.2688, -97.7428),
-        ],
-      ),
-      Member(
-        id: 'noah',
-        name: 'Noah Carter',
-        color: palette[4],
-        travelMode: TravelMode.walking,
-        battery: 96,
-        legIndex: 2,
-        route: const [
-          home,
-          LatLng(30.2688, -97.7480),
-          LatLng(30.2665, -97.7502),
-          LatLng(30.2652, -97.7472),
-          LatLng(30.2676, -97.7448),
-        ],
-      ),
-    ]);
-  }
-
-  void _seedAlerts() {
+  void _saveLastLocation(LatLng point) {
     final now = DateTime.now();
-    _alerts.addAll([
-      AlertEvent(
-        id: 'seed_1',
-        memberId: 'maria',
-        memberName: 'Maria Carter',
-        type: AlertType.arrival,
-        title: 'Maria arrived at Home',
-        body: 'Arrived at 148 Willow Creek Rd',
-        timestamp: now.subtract(const Duration(minutes: 12)),
-      ),
-      AlertEvent(
-        id: 'seed_2',
-        memberId: 'ethan',
-        memberName: 'Ethan Carter',
-        type: AlertType.departure,
-        title: 'Ethan left Oakwood High',
-        body: 'Left 700 Oakwood High Blvd',
-        timestamp: now.subtract(const Duration(minutes: 58)),
-      ),
-      AlertEvent(
-        id: 'seed_3',
-        memberId: 'lily',
-        memberName: 'Lily Carter',
-        type: AlertType.battery,
-        title: "Lily's battery dropped below 20%",
-        body: '19% remaining · charging not detected',
-        timestamp: now.subtract(const Duration(hours: 2, minutes: 40)),
-      ),
-      AlertEvent(
-        id: 'seed_4',
-        memberId: 'noah',
-        memberName: 'Noah Carter',
-        type: AlertType.arrival,
-        title: 'Noah arrived at Home',
-        body: 'Arrived at 148 Willow Creek Rd',
-        timestamp: now.subtract(const Duration(hours: 4, minutes: 5)),
-      ),
-      AlertEvent(
-        id: 'seed_5',
-        memberId: 'alex',
-        memberName: 'Alex Carter',
-        type: AlertType.info,
-        title: 'Location sharing is active',
-        body: 'All 5 circle members are sharing their location',
-        timestamp: now.subtract(const Duration(hours: 6)),
-      ),
-      AlertEvent(
-        id: 'seed_6',
-        memberId: 'maria',
-        memberName: 'Maria Carter',
-        type: AlertType.speed,
-        title: 'Maria was driving 72 mph',
-        body: 'Speed alert on Route 71',
-        timestamp: now.subtract(const Duration(days: 1, hours: 3)),
-      ),
-    ]);
-  }
-
-  void _seedMessages() {
-    final now = DateTime.now();
-    _messageCounter = 10;
-    _messages.addAll([
-      ChatMessage(
-        id: 'seed_msg_1',
-        senderId: 'maria',
-        text: "Dinner at 7? I'm making pasta.",
-        timestamp: now.subtract(const Duration(minutes: 38)),
-      ),
-      ChatMessage(
-        id: 'seed_msg_2',
-        senderId: 'ethan',
-        text: 'Can I get a ride home after practice?',
-        timestamp: now.subtract(const Duration(minutes: 30)),
-      ),
-      ChatMessage(
-        id: 'seed_msg_3',
-        senderId: 'alex',
-        text: "Sure, I'll pick you up at 6.",
-        timestamp: now.subtract(const Duration(minutes: 26)),
-      ),
-      ChatMessage(
-        id: 'seed_msg_4',
-        senderId: 'lily',
-        text: "I'm at the library with Mia. Home by 5.",
-        timestamp: now.subtract(const Duration(minutes: 15)),
-      ),
-      ChatMessage(
-        id: 'seed_msg_5',
-        senderId: 'noah',
-        text: 'Can we get pizza tonight?',
-        timestamp: now.subtract(const Duration(minutes: 8)),
-      ),
-    ]);
-  }
-
-  void _syncInitialPlaces() {
-    for (final member in _members) {
-      for (final place in _places) {
-        if (distanceMeters(member.position, place.point) <=
-            place.radiusMeters) {
-          member.currentPlaceId = place.id;
-          break;
-        }
-      }
+    if (_lastSavedAt != null &&
+        now.difference(_lastSavedAt!) < const Duration(seconds: 30)) {
+      return;
     }
+    _lastSavedAt = now;
+    _prefs?.setString(
+      _lastLocationKey,
+      jsonEncode({'lat': point.latitude, 'lng': point.longitude}),
+    );
   }
 
-  List<Place>? _restorePlaces() {
-    final raw = _prefs?.getString(_placesKey);
+  LatLng? _loadLastLocation() {
+    final raw = _prefs?.getString(_lastLocationKey);
     if (raw == null) return null;
     try {
-      final decoded = jsonDecode(raw) as List<dynamic>;
-      final restored = decoded
-          .map((item) => Place.fromJson(item as Map<String, dynamic>))
-          .toList();
-      return restored.isEmpty ? null : restored;
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      return LatLng(
+        (decoded['lat'] as num).toDouble(),
+        (decoded['lng'] as num).toDouble(),
+      );
     } catch (_) {
       return null;
     }
   }
 
-  void _savePlaces() {
-    final prefs = _prefs;
-    if (prefs == null) return;
-    prefs.setString(
-      _placesKey,
-      jsonEncode(_places.map((place) => place.toJson()).toList()),
-    );
-  }
+  Map<String, dynamic> _asMap(dynamic value) =>
+      Map<String, dynamic>.from(value as Map);
 
-  void _saveSettings() {
-    final prefs = _prefs;
-    if (prefs == null) return;
-    prefs.setString(
-      _settingsKey,
-      jsonEncode({
-        'sharing': sharingEnabled,
-        'notifications': notificationsEnabled,
-        'batterySaver': batterySaver,
-        'darkMode': darkMode,
-        'mapDark': mapDark,
-      }),
-    );
+  List<Map<String, dynamic>> _asMapList(dynamic value) => (value as List)
+      .map((item) => Map<String, dynamic>.from(item as Map))
+      .toList();
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // The position stream keeps running while the app is in the background
+    // (Android foreground service / iOS background mode). On resume we only
+    // restart it if the OS stopped it, and refresh circle data.
+    if (state == AppLifecycleState.resumed && phase == AppPhase.ready) {
+      if (_positionSub == null) unawaited(_startLocationUpdates());
+      unawaited(refreshData());
+    }
   }
 
   @override
   void dispose() {
     _disposed = true;
-    _simTimer?.cancel();
-    _replyTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _authSub?.cancel();
+    _positionSub?.cancel();
+    _channel?.unsubscribe();
     super.dispose();
   }
 }

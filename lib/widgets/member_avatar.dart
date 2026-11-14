@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../models/member.dart';
 import '../theme.dart';
@@ -11,14 +11,15 @@ class BatteryBadge extends StatelessWidget {
     this.dense = false,
   });
 
-  final double level;
+  final double? level;
   final bool dense;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final color = batteryColor(level);
+    final value = level;
+    final color = value == null ? LocmateColors.muted : batteryColor(value);
     return Container(
       padding: EdgeInsets.symmetric(
         horizontal: dense ? 5 : 8,
@@ -43,13 +44,15 @@ class BatteryBadge extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
-            batteryIcon(level),
+            value == null
+                ? Icons.battery_unknown_rounded
+                : batteryIcon(value),
             size: dense ? 11 : 14,
             color: color,
           ),
           SizedBox(width: dense ? 1 : 2),
           Text(
-            '${level.round()}%',
+            value == null ? '—' : '${value.round()}%',
             style: TextStyle(
               fontSize: dense ? 9 : 11,
               fontWeight: FontWeight.w700,
@@ -114,7 +117,24 @@ class MemberAvatar extends StatelessWidget {
             ),
           ),
         ),
-        if (showBattery)
+        if (!member.isSharing && !member.isCurrentUser)
+          Positioned(
+            right: -2,
+            bottom: -2,
+            child: Container(
+              padding: const EdgeInsets.all(3),
+              decoration: BoxDecoration(
+                color: isDark ? const Color(0xFF191622) : Colors.white,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.location_disabled_rounded,
+                size: 12,
+                color: LocmateColors.muted,
+              ),
+            ),
+          )
+        else if (showBattery)
           Positioned(
             right: -4,
             bottom: -4,

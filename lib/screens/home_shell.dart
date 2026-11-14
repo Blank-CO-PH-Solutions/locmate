@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import 'chat_screen.dart';
 import 'map_screen.dart';
@@ -14,22 +14,7 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  int _index = _initialIndex();
-
-  static int _initialIndex() {
-    switch (Uri.base.queryParameters['tab']) {
-      case 'places':
-        return 1;
-      case 'safety':
-        return 2;
-      case 'chat':
-        return 3;
-      case 'settings':
-        return 4;
-      default:
-        return 0;
-    }
-  }
+  int _index = 0;
 
   static const _screens = <Widget>[
     MapScreen(),

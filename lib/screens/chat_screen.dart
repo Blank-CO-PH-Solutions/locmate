@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:provider/provider.dart';
 
 import '../models/member.dart';
@@ -22,6 +22,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   int _lastMessageCount = 0;
+  bool _sending = false;
 
   @override
   void dispose() {
@@ -30,11 +31,21 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  void _send() {
+  Future<void> _send() async {
     final text = _controller.text;
-    if (text.trim().isEmpty) return;
-    context.read<AppState>().sendMessage(text);
-    _controller.clear();
+    if (text.trim().isEmpty || _sending) return;
+    setState(() => _sending = true);
+    try {
+      await context.read<AppState>().sendMessage(text);
+      _controller.clear();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(friendlyError(error))));
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
   }
 
   @override
@@ -70,7 +81,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   itemBuilder: (context, index) {
                     final message = messages[index];
                     final sender = state.memberById(message.senderId);
-                    final isMine = sender?.isCurrentUser ?? false;
+                    final isMine = sender?.isCurrentUser ??
+                        message.senderId == state.userId;
                     return _ChatBubble(
                       message: message,
                       sender: sender,
@@ -79,7 +91,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   },
                 ),
         ),
-        _Composer(controller: _controller, onSend: _send),
+        _Composer(
+          controller: _controller,
+          sending: _sending,
+          onSend: _send,
+        ),
       ],
     );
 
@@ -91,7 +107,8 @@ class _ChatScreenState extends State<ChatScreen> {
               ScreenHeader(
                 title: 'Chat',
                 subtitle:
-                    '${AppState.circleName} · ${state.members.length} members',
+                    '${state.circleName} · ${state.members.length} member'
+                    '${state.members.length == 1 ? '' : 's'}',
                 actions: [
                   Container(
                     padding: const EdgeInsets.all(8),
@@ -124,7 +141,8 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             const Text('Circle chat'),
             Text(
-              '${AppState.circleName} · ${state.members.length} members',
+              '${state.circleName} · ${state.members.length} member'
+              '${state.members.length == 1 ? '' : 's'}',
               style: TextStyle(
                 fontSize: 11.5,
                 fontWeight: FontWeight.w500,
@@ -140,10 +158,15 @@ class _ChatScreenState extends State<ChatScreen> {
 }
 
 class _Composer extends StatelessWidget {
-  const _Composer({required this.controller, required this.onSend});
+  const _Composer({
+    required this.controller,
+    required this.sending,
+    required this.onSend,
+  });
 
   final TextEditingController controller;
-  final VoidCallback onSend;
+  final bool sending;
+  final Future<void> Function() onSend;
 
   @override
   Widget build(BuildContext context) {
@@ -166,11 +189,13 @@ class _Composer extends StatelessWidget {
                 controller: controller,
                 minLines: 1,
                 maxLines: 4,
+                maxLength: 2000,
                 textCapitalization: TextCapitalization.sentences,
                 textInputAction: TextInputAction.send,
                 onSubmitted: (_) => onSend(),
                 decoration: const InputDecoration(
                   hintText: 'Message the circle...',
+                  counterText: '',
                   contentPadding: EdgeInsets.symmetric(
                     horizontal: 14,
                     vertical: 11,
@@ -180,7 +205,7 @@ class _Composer extends StatelessWidget {
             ),
             const SizedBox(width: 8),
             IconButton.filled(
-              onPressed: onSend,
+              onPressed: sending ? null : () => onSend(),
               tooltip: 'Send message',
               style: IconButton.styleFrom(
                 padding: const EdgeInsets.all(12),
@@ -188,7 +213,16 @@ class _Composer extends StatelessWidget {
                   borderRadius: BorderRadius.circular(14),
                 ),
               ),
-              icon: const Icon(Icons.send_rounded, size: 20),
+              icon: sending
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.send_rounded, size: 20),
             ),
           ],
         ),
@@ -246,7 +280,7 @@ class _ChatBubble extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.only(left: 4, bottom: 3),
                     child: Text(
-                      sender?.name ?? 'Member',
+                      sender?.name ?? 'Former member',
                       style: TextStyle(
                         fontSize: 10.5,
                         fontWeight: FontWeight.w700,

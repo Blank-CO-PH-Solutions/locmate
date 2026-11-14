@@ -1,7 +1,8 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
+import '../config.dart';
 import '../models/member.dart';
 import '../models/place.dart';
 import '../state/app_state.dart';
@@ -9,6 +10,7 @@ import '../theme.dart';
 import '../utils.dart';
 import '../widgets/common.dart';
 import '../widgets/member_avatar.dart';
+import 'subscription_screen.dart';
 
 class PlacesScreen extends StatelessWidget {
   const PlacesScreen({super.key});
@@ -54,7 +56,7 @@ class PlacesScreen extends StatelessWidget {
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
-                            'Everyone in ${AppState.circleName} gets an alert '
+                            'Everyone in ${state.circleName} gets an alert '
                             'when a member comes or goes.',
                             style: TextStyle(
                               fontSize: 11.5,
@@ -66,13 +68,20 @@ class PlacesScreen extends StatelessWidget {
                       ],
                     ),
                   ),
+                  if (!state.circlePremium) ...[
+                    const SizedBox(height: 10),
+                    _FreePlanNotice(state: state),
+                  ],
                   const SizedBox(height: 14),
                   if (state.places.isEmpty)
-                    const SurfaceCard(
-                      child: EmptyState(
+                    SurfaceCard(
+                      onTap: () => _showAddPlace(context),
+                      child: const EmptyState(
                         icon: Icons.place_rounded,
                         title: 'No places yet',
-                        message: 'Add Home, School or Work to get alerts.',
+                        message:
+                            'Add Home, School or Work to get arrival and '
+                            'departure alerts.',
                       ),
                     )
                   else
@@ -86,7 +95,10 @@ class PlacesScreen extends StatelessWidget {
                         ),
                       ),
                   const SizedBox(height: 4),
-                  _AddPlaceTile(onTap: () => _showAddPlace(context)),
+                  _AddPlaceTile(
+                    onTap: () => _showAddPlace(context),
+                    locked: !state.canAddPlace,
+                  ),
                 ],
               ),
             ),
@@ -97,10 +109,37 @@ class PlacesScreen extends StatelessWidget {
   }
 
   Future<void> _showAddPlace(BuildContext context) async {
+    final state = context.read<AppState>();
+    if (!state.canAddPlace) {
+      final upgrade = await _showUpgradeDialog(context, state);
+      if (upgrade == true && context.mounted) {
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const SubscriptionScreen()),
+        );
+      }
+      return;
+    }
+
+    final point = state.currentUserOrNull?.position;
+    if (point == null) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Turn on location sharing first. Places are pinned to where '
+              'you are now.',
+            ),
+          ),
+        );
+      await state.refreshMyLocation();
+      return;
+    }
+
     final added = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
-      builder: (_) => const _AddPlaceSheet(),
+      builder: (_) => _AddPlaceSheet(point: point),
     );
     if (added == true && context.mounted) {
       ScaffoldMessenger.of(context)
@@ -109,6 +148,34 @@ class PlacesScreen extends StatelessWidget {
           const SnackBar(content: Text('Place added to your circle')),
         );
     }
+  }
+
+  Future<bool?> _showUpgradeDialog(BuildContext context, AppState state) {
+    return showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(
+          Icons.workspace_premium_rounded,
+          size: 30,
+          color: LocmateColors.primary,
+        ),
+        title: const Text('Place limit reached'),
+        content: Text(
+          'The Free plan includes ${PlanLimits.freePlaces} places per circle. '
+          '${state.isOwner ? 'Upgrade this circle to Premium for unlimited places.' : 'Ask the circle owner to upgrade for unlimited places.'}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('See Premium'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _confirmRemove(BuildContext context, Place place) async {
@@ -136,10 +203,78 @@ class PlacesScreen extends StatelessWidget {
       ),
     );
     if (confirmed != true || !context.mounted) return;
-    state.removePlace(place.id);
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text('${place.name} removed')));
+    try {
+      await state.removePlace(place.id);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('${place.name} removed')));
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(friendlyError(error))));
+    }
+  }
+}
+
+class _FreePlanNotice extends StatelessWidget {
+  const _FreePlanNotice({required this.state});
+
+  final AppState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final limit = state.placeLimit ?? PlanLimits.freePlaces;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const SubscriptionScreen()),
+        ),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+          decoration: BoxDecoration(
+            color: scheme.primary.withValues(alpha: 0.06),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.workspace_premium_outlined,
+                size: 17,
+                color: scheme.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Free plan · ${state.places.length} of $limit places used',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const SubscriptionScreen(),
+                  ),
+                ),
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(0, 30),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                ),
+                child: const Text('Upgrade'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -185,7 +320,7 @@ class _PlaceCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 1),
                 Text(
-                  place.address,
+                  place.displayAddress,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -288,9 +423,10 @@ class _AvatarStack extends StatelessWidget {
 }
 
 class _AddPlaceTile extends StatelessWidget {
-  const _AddPlaceTile({required this.onTap});
+  const _AddPlaceTile({required this.onTap, this.locked = false});
 
   final VoidCallback onTap;
+  final bool locked;
 
   @override
   Widget build(BuildContext context) {
@@ -311,11 +447,15 @@ class _AddPlaceTile extends StatelessWidget {
           ),
           child: Row(
             children: [
-              Icon(Icons.add_rounded, color: scheme.primary, size: 22),
+              Icon(
+                locked ? Icons.workspace_premium_outlined : Icons.add_rounded,
+                color: scheme.primary,
+                size: 22,
+              ),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'Add another place',
+                  locked ? 'Upgrade for unlimited places' : 'Add another place',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -333,45 +473,16 @@ class _AddPlaceTile extends StatelessWidget {
   }
 }
 
-class _AreaPreset {
-  const _AreaPreset(this.label, this.address, this.point);
-
-  final String label;
-  final String address;
-  final LatLng point;
-}
-
 class _AddPlaceSheet extends StatefulWidget {
-  const _AddPlaceSheet();
+  const _AddPlaceSheet({required this.point});
+
+  final LatLng point;
 
   @override
   State<_AddPlaceSheet> createState() => _AddPlaceSheetState();
 }
 
 class _AddPlaceSheetState extends State<_AddPlaceSheet> {
-  static const _presets = [
-    _AreaPreset(
-      'Riverside Park',
-      '410 River Rd',
-      LatLng(30.2650, -97.7500),
-    ),
-    _AreaPreset(
-      'Northside Mall',
-      '900 Northside Blvd',
-      LatLng(30.2780, -97.7300),
-    ),
-    _AreaPreset(
-      'Downtown',
-      '100 Congress Ave',
-      LatLng(30.2672, -97.7431),
-    ),
-    _AreaPreset(
-      'Eastwood Library',
-      '55 Eastwood Ln',
-      LatLng(30.2690, -97.7320),
-    ),
-  ];
-
   static const _categories = [
     ('home', 'Home', Icons.home_rounded),
     ('work', 'Work', Icons.work_rounded),
@@ -381,32 +492,46 @@ class _AddPlaceSheetState extends State<_AddPlaceSheet> {
   ];
 
   final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _addressController = TextEditingController();
   String _category = 'home';
-  int _presetIndex = 0;
   double _radius = 180;
   String? _error;
+  bool _saving = false;
 
   @override
   void dispose() {
     _nameController.dispose();
+    _addressController.dispose();
     super.dispose();
   }
 
-  void _save() {
+  Future<void> _save() async {
     final name = _nameController.text.trim();
     if (name.isEmpty) {
       setState(() => _error = 'Give this place a name first.');
       return;
     }
-    final preset = _presets[_presetIndex];
-    context.read<AppState>().addPlace(
-          name: name,
-          category: _category,
-          address: preset.address,
-          point: preset.point,
-          radiusMeters: _radius,
-        );
-    Navigator.of(context).pop(true);
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await context.read<AppState>().addPlace(
+        name: name,
+        category: _category,
+        address: _addressController.text.trim(),
+        point: widget.point,
+        radiusMeters: _radius,
+      );
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = friendlyError(error);
+        });
+      }
+    }
   }
 
   @override
@@ -435,12 +560,42 @@ class _AddPlaceSheetState extends State<_AddPlaceSheet> {
                   ),
                 ),
                 IconButton(
-                  onPressed: () => Navigator.of(context).pop(),
+                  onPressed: _saving ? null : () => Navigator.of(context).pop(),
                   icon: const Icon(Icons.close_rounded),
                 ),
               ],
             ),
             const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(11),
+              decoration: BoxDecoration(
+                color: scheme.primary.withValues(alpha: 0.07),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.my_location_rounded,
+                    size: 17,
+                    color: scheme.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Pinned to your current location · '
+                      '${formatCoordinates(widget.point)}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        height: 1.35,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
             TextField(
               controller: _nameController,
               textCapitalization: TextCapitalization.words,
@@ -448,13 +603,22 @@ class _AddPlaceSheetState extends State<_AddPlaceSheet> {
                 if (_error != null) setState(() => _error = null);
               },
               decoration: const InputDecoration(
-                hintText: "Place name (e.g. Grandma's house)",
+                hintText: 'Place name (e.g. Home)',
                 prefixIcon: Icon(Icons.edit_location_alt_outlined),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _addressController,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                hintText: 'Address or note (optional)',
+                prefixIcon: Icon(Icons.location_on_outlined),
               ),
             ),
             if (_error != null)
               Padding(
-                padding: const EdgeInsets.only(top: 6, left: 4),
+                padding: const EdgeInsets.only(top: 8, left: 4),
                 child: Text(
                   _error!,
                   style: const TextStyle(
@@ -489,43 +653,10 @@ class _AddPlaceSheetState extends State<_AddPlaceSheet> {
                           : scheme.onSurfaceVariant,
                     ),
                     selected: _category == category.$1,
-                    onSelected: (_) =>
-                        setState(() => _category = category.$1),
+                    onSelected: (_) => setState(() => _category = category.$1),
                     showCheckmark: false,
                   ),
               ],
-            ),
-            const SizedBox(height: 18),
-            Text(
-              'Area',
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 8),
-            DropdownMenu<int>(
-              initialSelection: _presetIndex,
-              expandedInsets: EdgeInsets.zero,
-              menuHeight: 280,
-              leadingIcon: Icon(
-                Icons.map_outlined,
-                size: 20,
-                color: scheme.onSurfaceVariant,
-              ),
-              label: const Text('Choose an area'),
-              dropdownMenuEntries: [
-                for (var i = 0; i < _presets.length; i++)
-                  DropdownMenuEntry(
-                    value: i,
-                    label:
-                        '${_presets[i].label} · ${_presets[i].address}',
-                  ),
-              ],
-              onSelected: (value) {
-                if (value != null) setState(() => _presetIndex = value);
-              },
             ),
             const SizedBox(height: 18),
             Row(
@@ -559,8 +690,17 @@ class _AddPlaceSheetState extends State<_AddPlaceSheet> {
             ),
             const SizedBox(height: 10),
             FilledButton.icon(
-              onPressed: _save,
-              icon: const Icon(Icons.add_location_alt_rounded, size: 19),
+              onPressed: _saving ? null : _save,
+              icon: _saving
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.add_location_alt_rounded, size: 19),
               label: const Text('Save place'),
             ),
           ],

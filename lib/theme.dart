@@ -1,19 +1,19 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 class LocmateColors {
-  static const primary = Color(0xFF5B3AC8);
-  static const primaryDeep = Color(0xFF37207E);
+  static const primary = Color(0xFF6D28D9);
+  static const primaryDeep = Color(0xFF3B0F7A);
   static const accent = Color(0xFFFF7A59);
   static const safe = Color(0xFF1FB981);
   static const warning = Color(0xFFF5A623);
   static const danger = Color(0xFFEF4444);
-  static const background = Color(0xFFF5F4FA);
+  static const background = Color(0xFFF6F4FB);
   static const ink = Color(0xFF1C1B22);
   static const muted = Color(0xFF7B7890);
   static const line = Color(0xFFE9E6F2);
 
   static const memberPalette = [
-    Color(0xFF6C4BF4),
+    Color(0xFF7C3AED),
     Color(0xFF17B3A3),
     Color(0xFFF2994A),
     Color(0xFFE0559B),

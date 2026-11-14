@@ -1,7 +1,7 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:latlong2/latlong.dart';
 
-enum TravelMode { driving, walking }
+import '../theme.dart';
 
 enum MotionState { stationary, walking, driving }
 
@@ -9,46 +9,62 @@ class Member {
   Member({
     required this.id,
     required this.name,
-    required this.color,
-    required this.route,
-    required this.travelMode,
+    required this.colorIndex,
     this.isCurrentUser = false,
     this.isOwner = false,
-    this.battery = 85,
-    this.legIndex = 0,
-    this.legT = 0,
-    this.dwellTicks = 0,
-    this.currentPlaceId,
-  }) : position = route[legIndex];
+    this.position,
+    this.accuracy,
+    this.heading,
+    this.speed = 0,
+    this.battery,
+    this.isSharing = true,
+    this.lastUpdated,
+  });
 
   final String id;
   String name;
-  final Color color;
+  final int colorIndex;
   final bool isCurrentUser;
   final bool isOwner;
-  final List<LatLng> route;
-  final TravelMode travelMode;
 
-  LatLng position;
-  double battery;
-  int legIndex;
-  double legT;
-  int dwellTicks;
-  String? currentPlaceId;
-  MotionState motion = MotionState.stationary;
-  double speedMph = 0;
-  DateTime lastUpdated = DateTime.now();
-  bool lowBatteryAlerted = false;
+  LatLng? position;
+  double? accuracy;
+  double? heading;
+  double speed;
+  double? battery;
+  bool isSharing;
+  DateTime? lastUpdated;
+
+  Color get color =>
+      LocmateColors.memberPalette[colorIndex % LocmateColors.memberPalette.length];
 
   String get initials {
-    final parts = name.trim().split(RegExp(r'\s+'));
-    if (parts.isEmpty || parts.first.isEmpty) return '?';
-    if (parts.length == 1) return parts.first.substring(0, 1).toUpperCase();
+    final parts =
+        name.trim().split(RegExp(r'\s+')).where((part) => part.isNotEmpty);
+    if (parts.isEmpty) return '?';
+    if (parts.length == 1) {
+      return parts.first.substring(0, 1).toUpperCase();
+    }
     return (parts.first.substring(0, 1) + parts.last.substring(0, 1))
         .toUpperCase();
   }
 
-  String get firstName => name.split(' ').first;
+  String get firstName {
+    final parts = name.trim().split(RegExp(r'\s+'));
+    return parts.isEmpty || parts.first.isEmpty ? name : parts.first;
+  }
+
+  MotionState get motion {
+    if (speed >= 5.5) return MotionState.driving;
+    if (speed >= 0.7) return MotionState.walking;
+    return MotionState.stationary;
+  }
 
   bool get isMoving => motion != MotionState.stationary;
+
+  bool get hasLocation => position != null;
+
+  bool get isStale =>
+      lastUpdated == null ||
+      DateTime.now().difference(lastUpdated!) > const Duration(minutes: 15);
 }
