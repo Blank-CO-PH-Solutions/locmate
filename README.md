@@ -97,6 +97,24 @@ The app calls `Purchases.logIn(<Supabase user id>)`, so RevenueCat's `app_user_i
 
 Purchases are available on iOS, Android and macOS. Windows and Linux builds show the plans but cannot purchase.
 
+### Internal team access
+
+Blank CO PH Solutions staff can use Premium without a store purchase. After the team member has created an account, add them in the Supabase SQL editor:
+
+```sql
+select public.add_internal_tester('teammate@blankcoph.solutions');
+```
+
+Remove access with:
+
+```sql
+select public.remove_internal_tester('teammate@blankcoph.solutions');
+```
+
+Internal access is stored in `public.internal_testers` and is checked by `public.is_premium()`, so the database enforces it just like a paid subscription. A circle is Premium when its **owner** is internal; external users and circles owned by them stay on the Free plan.
+
+Once RevenueCat is configured, you can also comp access there: open the customer in RevenueCat, click **Grant** in the Entitlements card, and choose the `premium` entitlement and an end date. RevenueCat sends that to the webhook as a promotional `NON_RENEWING_PURCHASE`, so the app picks it up without a rebuild. Use one method or the other; `internal_testers` is the option that works before RevenueCat is set up.
+
 ## Desktop builds
 
 The `linux/`, `macos/` and `windows/` runner projects are checked in. Build them with the usual commands:
