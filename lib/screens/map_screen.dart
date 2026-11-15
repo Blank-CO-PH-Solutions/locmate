@@ -24,15 +24,16 @@ import 'member_detail_screen.dart';
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
 
-  /// Forces the map provider on or off. Tests use this because native map
-  /// views do not render in widget tests.
+  /// Forces Google Maps on or off. Tests use this because Google Maps is a
+  /// native platform view that does not render in widget tests.
   @visibleForTesting
-  static bool? useMapProviderOverride;
+  static bool? useGoogleMapsOverride;
 
-  /// TomTom runs on Android and iOS. Desktop builds (Linux, Windows, macOS)
-  /// and the web build fall back to OpenStreetMap.
-  static bool get useTomtom =>
-      useMapProviderOverride ??
+  /// Google Maps runs on Android and iOS. Desktop builds (Linux, Windows,
+  /// macOS) and the web build have no Google Maps SDK configured, so they keep
+  /// the OpenStreetMap fallback.
+  static bool get useGoogleMaps =>
+      useGoogleMapsOverride ??
       (!kIsWeb &&
           (defaultTargetPlatform == TargetPlatform.android ||
               defaultTargetPlatform == TargetPlatform.iOS));
@@ -43,7 +44,7 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final osm.MapController _osmController = osm.MapController();
-  dynamic _tomtomController;
+  gm.GoogleMapController? _googleController;
   MapMarkerIcons? _markerIcons;
   bool _iconsLoading = false;
   bool _mapReady = false;
@@ -66,7 +67,7 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   void dispose() {
-    _tomtomController = null;
+    _googleController?.dispose();
     super.dispose();
   }
 
@@ -83,13 +84,14 @@ class _MapScreenState extends State<MapScreen> {
       _firstMemberPosition(state) ??
       _worldCenter;
 
-  static LatLng _toTomtom(LatLng point) => LatLng(point.latitude, point.longitude);
+  static gm.LatLng _toGoogle(LatLng point) =>
+      gm.LatLng(point.latitude, point.longitude);
 
   void _moveCamera(LatLng target, double zoom) {
     if (!_mapReady) return;
-    if (MapScreen.useTomtom) {
-      _tomtomController?.animateCamera(
-        gm.CameraUpdate.newLatLngZoom(_toTomtom(target), zoom),
+    if (MapScreen.useGoogleMaps) {
+      _googleController?.animateCamera(
+        gm.CameraUpdate.newLatLngZoom(_toGoogle(target), zoom),
       );
     } else {
       _osmController.move(target, zoom);
@@ -205,66 +207,72 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
-  List<Object> _tomtomMarkers(AppState state) {
+  Set<gm.Marker> _googleMarkers(AppState state) {
     final icons = _markerIcons;
     final selectedId = state.selectedMember?.id;
     final members = _mapMembers(state);
-    final markers = <Object>[];
-    for (final place in state.places) {
-      markers.add(
-        TomtomMarker(
-          markerId: 'place-${place.id}',
-          position: _toTomtom(place.point),
+    return {
+      for (final place in state.places)
+        gm.Marker(
+          markerId: gm.MarkerId('place-${place.id}'),
+          position: _toGoogle(place.point),
           anchor: const Offset(0.5, 0.5),
-          icon: icons?.cached(MapMarkerIcons.placeKey(place)),
-          infoWindow: TomtomInfoWindow(title: place.name),
+          icon:
+              icons?.cached(MapMarkerIcons.placeKey(place)) ??
+              gm.BitmapDescriptor.defaultMarkerWithHue(
+                gm.BitmapDescriptor.hueViolet,
+              ),
+          infoWindow: gm.InfoWindow(title: place.name),
           zIndexInt: 1,
         ),
-      );
-    }
-    for (var i = 0; i < members.length; i++) {
-      final member = members[i];
-      if (member.position == null) continue;
-      markers.add(
-        TomtomMarker(
-          markerId: 'member-${member.id}',
-          position: _toTomtom(member.position!),
-          anchor: const Offset(0.5, 0.36),
-          icon: icons?.cached(
-            MapMarkerIcons.memberKey(member, selected: member.id == selectedId),
+      for (var i = 0; i < members.length; i++)
+        if (members[i].position != null)
+          gm.Marker(
+            markerId: gm.MarkerId('member-${members[i].id}'),
+            position: _toGoogle(members[i].position!),
+            anchor: const Offset(0.5, 0.36),
+            icon:
+                icons?.cached(
+                  MapMarkerIcons.memberKey(
+                    members[i],
+                    selected: members[i].id == selectedId,
+                  ),
+                ) ??
+                gm.BitmapDescriptor.defaultMarker,
+            consumeTapEvents: true,
+            onTap: () => _focusMember(members[i]),
+            // Selected member on top, then the current user.
+            zIndexInt: members[i].id == selectedId ? 100 : 50 - i,
           ),
-          consumeTapEvents: true,
-          onTap: () => _focusMember(member),
-          zIndexInt: member.id == selectedId ? 100 : 50 - i,
-        ),
-      );
-    }
-    return markers;
+    };
   }
 
-  Widget _buildTomtomMap(AppState state) {
+  Widget _buildGoogleMap(AppState state) {
     final hasPosition = state.currentUserOrNull?.position != null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _ensureMarkerIcons(state);
     });
-    return TomtomMap(
-      initialCameraPosition: TomtomCameraPosition(
-        target: _toTomtom(_initialCenter(state)),
+    return gm.GoogleMap(
+      initialCameraPosition: gm.CameraPosition(
+        target: _toGoogle(_initialCenter(state)),
         zoom: hasPosition ? 15 : 3,
       ),
-      markers: _tomtomMarkers(state),
+      style: state.mapDark ? googleMapDarkStyle : null,
+      markers: _googleMarkers(state),
+      minMaxZoomPreference: const gm.MinMaxZoomPreference(2, 20),
       rotateGesturesEnabled: false,
+      myLocationButtonEnabled: false,
       zoomControlsEnabled: false,
       mapToolbarEnabled: false,
       compassEnabled: false,
-      // Keep the map and markers clear of the floating overlays.
+      // Keep the Google logo and markers clear of the floating overlays.
       padding: EdgeInsets.only(
         top: MediaQuery.paddingOf(context).top + 80,
         bottom: _panelHeight,
       ),
       onTap: (_) => state.selectMember(null),
       onMapCreated: (controller) {
-        _tomtomController = controller;
+        _googleController = controller;
         _mapReady = true;
         if (mounted) setState(() {});
       },
@@ -339,8 +347,8 @@ class _MapScreenState extends State<MapScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          if (MapScreen.useTomtom)
-            _buildTomtomMap(state)
+          if (MapScreen.useGoogleMaps)
+            _buildGoogleMap(state)
           else
             _buildOsmMap(state),
           Positioned(
@@ -399,7 +407,7 @@ class _MapScreenState extends State<MapScreen> {
                     state: state,
                     selected: selected,
                     minimized: _panelMinimized,
-                    showOsmAttribution: !MapScreen.useTomtom,
+                    showOsmAttribution: !MapScreen.useGoogleMaps,
                     onToggleMinimized: () =>
                         setState(() => _panelMinimized = !_panelMinimized),
                     onSelect: _focusMember,
