@@ -8,24 +8,10 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const express = require("express");
 
-const { config, planList } = require("./lib/config");
-const { formatPeso } = require("./lib/ui");
-const {
-  PayMongoError,
-  createCheckoutSession,
-  verifyWebhookSignature,
-  normalizePaidEvent,
-} = require("./lib/paymongo");
-const {
-  SupabaseError,
-  recordPaymongoPurchase,
-  getPurchaseByReference,
-} = require("./lib/supabase");
+const { config } = require("./lib/config");
 const {
   homePage,
-  premiumPage,
   downloadPage,
-  successPage,
   legalPage,
   notFoundPage,
 } = require("./lib/pages");
@@ -137,15 +123,6 @@ app.get("/api/config", (req, res) => {
   res.json({
     company: config.company,
     supportEmail: config.supportEmail,
-    trialDays: config.trialDays,
-    paymentsConfigured: config.paymentsConfigured,
-    plans: planList().map((plan) => ({
-      id: plan.id,
-      name: plan.name,
-      days: plan.days,
-      amount: plan.amount,
-      displayAmount: formatPeso(plan.amount),
-    })),
     download: {
       available: Boolean(config.apkUrl),
       version: config.apkVersion,
@@ -165,199 +142,18 @@ app.get("/api/download", (req, res) => {
   res.redirect(302, config.apkUrl);
 });
 
-app.post(
-  "/api/checkout",
-  rateLimit({ windowMs: 10 * 60 * 1000, max: 10 }),
-  express.json({ limit: "10kb" }),
-  async (req, res) => {
-    if (!config.paymentsConfigured) {
-      return res.status(503).json({
-        error: "payments_not_configured",
-        message:
-          "Payments are being enabled. The free trial is available in the app.",
-      });
-    }
-    if (!config.hasSupabase) {
-      return res.status(503).json({
-        error: "storage_not_configured",
-        message: "Checkout is temporarily unavailable. Please try again later.",
-      });
-    }
-
-    const planId = String(req.body?.plan || "").trim();
-    const plan = config.plans[planId];
-    if (!plan) {
-      return res.status(400).json({
-        error: "invalid_plan",
-        message: "Choose the monthly or annual Premium pass.",
-      });
-    }
-
-    const email = String(req.body?.email || "")
-      .trim()
-      .toLowerCase();
-    if (email.length > 254 || !EMAIL_RE.test(email)) {
-      return res.status(400).json({
-        error: "invalid_email",
-        message: "Enter the email address you use for Locmate.",
-      });
-    }
-
-    const reference = newReference();
-
-    try {
-      const session = await createCheckoutSession({
-        email,
-        plan,
-        reference,
-        baseUrl: baseUrl(req),
-      });
-
-      console.log(
-        `[checkout] created ${reference} plan=${plan.id} session=${session.id}`,
-      );
-      res.setHeader("Cache-Control", "no-store");
-      return res.json({
-        checkoutUrl: session.checkoutUrl,
-        reference,
-      });
-    } catch (error) {
-      const status = error instanceof PayMongoError ? error.status : 502;
-      console.error(
-        `[checkout] failed ${reference} plan=${plan.id}: ${error.message}`,
-      );
-      return res.status(status >= 500 ? 502 : status).json({
-        error: "checkout_failed",
-        message:
-          "We could not start checkout. Please try again in a moment, or email " +
-          config.supportEmail +
-          ".",
-        ...(config.nodeEnv === "production"
-          ? {}
-          : { detail: error.message }),
-      });
-    }
-  },
-);
-
-app.get(
-  "/api/purchase-status",
-  rateLimit({ windowMs: 10 * 60 * 1000, max: 120 }),
-  async (req, res) => {
-    const reference = String(req.query.ref || "").trim();
-    if (!validReference(reference)) {
-      return res.status(400).json({ error: "invalid_reference" });
-    }
-    if (!config.hasSupabase) {
-      return res.status(503).json({ error: "storage_not_configured" });
-    }
-
-    try {
-      const purchase = await getPurchaseByReference(reference);
-      if (!purchase) {
-        return res.json({ status: "unknown" });
-      }
-      return res.json({
-        status: purchase.granted_at ? "granted" : "pending",
-        plan: purchase.plan,
-        days: purchase.days,
-        grantedAt: purchase.granted_at || null,
-      });
-    } catch (error) {
-      console.error(
-        `[status] failed reference=${reference}: ${error.message}`,
-      );
-      return res.status(503).json({ error: "status_unavailable" });
-    }
-  },
-);
-
 // ---------- PayMongo webhook ----------
 // Raw body is required for signature verification, so this route must be
 // registered before express.json() is used anywhere else.
-app.post(
-  "/webhooks/paymongo",
-  express.raw({ type: "*/*", limit: "2mb" }),
-  async (req, res) => {
-    const signature =
-      req.get("Paymongo-Signature") || req.get("paymongo-signature");
-
-    if (!verifyWebhookSignature(req.body, signature)) {
-      console.warn("[webhook] rejected: invalid signature");
-      return res.status(401).json({ ok: false, error: "invalid_signature" });
-    }
-
-    let event;
-    try {
-      event = JSON.parse(req.body.toString("utf8"));
-    } catch {
-      console.warn("[webhook] rejected: invalid JSON");
-      return res.status(400).json({ ok: false, error: "invalid_json" });
-    }
-
-    const eventType = event?.data?.attributes?.type || "unknown";
-    const purchase = normalizePaidEvent(event);
-
-    if (!purchase) {
-      console.log(`[webhook] ignored type=${eventType}`);
-      return res.json({ ok: true, ignored: true });
-    }
-
-    if (!config.hasSupabase) {
-      console.error(`[webhook] Supabase not configured; cannot record ${purchase.paymentId}`);
-      return res.status(500).json({ ok: false, error: "storage_not_configured" });
-    }
-
-    try {
-      const result = await recordPaymongoPurchase(purchase);
-      console.log(
-        `[webhook] ${eventType} payment=${purchase.paymentId} plan=${purchase.plan} status=${result?.status || "unknown"}`,
-      );
-      return res.json({ ok: true, status: result?.status || "unknown" });
-    } catch (error) {
-      console.error(
-        `[webhook] failed payment=${purchase.paymentId}: ${error.message}`,
-      );
-      // A 500 tells PayMongo to retry. The RPC is idempotent on payment id.
-      return res.status(500).json({ ok: false, error: "recording_failed" });
-    }
-  },
-);
-
 // ---------- Pages ----------
 app.get("/", (req, res) => {
   res.setHeader("Cache-Control", "public, max-age=300");
   res.type("html").send(homePage());
 });
 
-app.get("/premium", (req, res) => {
-  res.setHeader("Cache-Control", "public, max-age=60");
-  res
-    .type("html")
-    .send(premiumPage({ canceled: req.query.canceled === "1" }));
-});
-
 app.get("/download", (req, res) => {
   res.setHeader("Cache-Control", "public, max-age=120");
   res.type("html").send(downloadPage());
-});
-
-app.get("/success", async (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  const reference = String(req.query.ref || "").trim();
-  let purchase = null;
-
-  if (validReference(reference) && config.hasSupabase) {
-    try {
-      purchase = await getPurchaseByReference(reference);
-    } catch (error) {
-      console.error(`[success] status lookup failed: ${error.message}`);
-    }
-  }
-
-  res
-    .type("html")
-    .send(successPage({ purchase, reference: validReference(reference) ? reference : "" }));
 });
 
 app.get("/privacy", (req, res) => {

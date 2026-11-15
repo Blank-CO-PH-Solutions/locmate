@@ -115,7 +115,6 @@ function layout({
       </a>
       <nav class="nav-links" aria-label="Main navigation">
         ${navItem("Why Locmate", "/#features", path)}
-        ${navItem("Premium", "/premium", path)}
         ${navItem("Download", "/download", path)}
         ${navItem("Help", "/#faq", path)}
       </nav>
@@ -142,7 +141,6 @@ function layout({
       <div>
         <h2>Product</h2>
         <a href="/#features">Features</a>
-        <a href="/premium">Premium plans</a>
         <a href="/download">Download for Android</a>
         <a href="/#faq">FAQ</a>
       </div>
