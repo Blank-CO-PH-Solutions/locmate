@@ -70,10 +70,10 @@ jobs:
 
       - name: Build release APK
         env:
-          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          MAPBOX_ACCESS_TOKEN: ${{ secrets.MAPBOX_ACCESS_TOKEN }}
         run: |
           flutter pub get
-          flutter build apk --release
+          flutter build apk --release --dart-define=ACCESS_TOKEN="$MAPBOX_ACCESS_TOKEN"
 
       - name: Summarize
         run: |
