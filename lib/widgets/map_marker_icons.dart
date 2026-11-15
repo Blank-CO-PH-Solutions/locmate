@@ -1,6 +1,7 @@
 import 'dart:ui' as ui;
 import 'dart:typed_data';
 
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../models/member.dart';
@@ -8,16 +9,16 @@ import '../models/place.dart';
 import '../theme.dart';
 import '../utils.dart';
 
-/// Draws map marker bitmaps for members and places.
+/// Draws Google Maps marker bitmaps for members and places.
 ///
-/// Map markers are images, not widgets, so the avatar look from
+/// Google Maps markers are images, not widgets, so the avatar look from
 /// [MemberAvatar] is painted onto a canvas. Results are cached by their visual
 /// inputs, so a marker is only redrawn when something it shows changes.
 class MapMarkerIcons {
   MapMarkerIcons({required this.pixelRatio});
 
   final double pixelRatio;
-  final Map<String, Uint8List> _cache = {};
+  final Map<String, BitmapDescriptor> _cache = {};
 
   static const double _memberWidth = 92;
   static const double _labelHeight = 22;
@@ -36,9 +37,9 @@ class MapMarkerIcons {
 
   static String placeKey(Place place) => 'p|${place.icon}';
 
-  Uint8List? cached(String key) => _cache[key];
+  BitmapDescriptor? cached(String key) => _cache[key];
 
-  Future<Uint8List> member(
+  Future<BitmapDescriptor> member(
     Member member, {
     required bool selected,
   }) async {
@@ -49,10 +50,13 @@ class MapMarkerIcons {
       const Size(_memberWidth, 50 + 6 + _labelHeight + 4),
       (canvas, size) => _paintMember(canvas, size, member, selected),
     );
-    return _cache[key] = bytes;
+    return _cache[key] = BitmapDescriptor.bytes(
+      bytes,
+      imagePixelRatio: pixelRatio,
+    );
   }
 
-  Future<Uint8List> place(Place place) async {
+  Future<BitmapDescriptor> place(Place place) async {
     final key = placeKey(place);
     final hit = _cache[key];
     if (hit != null) return hit;
@@ -60,7 +64,10 @@ class MapMarkerIcons {
       const Size(40, 40),
       (canvas, size) => _paintPlace(canvas, size, place),
     );
-    return _cache[key] = bytes;
+    return _cache[key] = BitmapDescriptor.bytes(
+      bytes,
+      imagePixelRatio: pixelRatio,
+    );
   }
 
   Future<Uint8List> _paint(
@@ -253,8 +260,8 @@ class MapMarkerIcons {
   }
 }
 
-/// Map night style used when "Dark map style" is on.
-const String mapDarkStyle = '''
+/// Google Maps night style used when "Dark map style" is on.
+const String googleMapDarkStyle = '''
 [
   {"elementType":"geometry","stylers":[{"color":"#1d1b26"}]},
   {"elementType":"labels.text.fill","stylers":[{"color":"#8f8aa3"}]},
