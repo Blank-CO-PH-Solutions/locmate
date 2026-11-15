@@ -3,6 +3,7 @@ import 'package:material_ui/material_ui.dart';
 import 'chat_screen.dart';
 import 'map_screen.dart';
 import 'circle_info_screen.dart';
+import 'driving_screen.dart';
 import 'safety_screen.dart';
 import 'settings_screen.dart';
 
@@ -18,6 +19,7 @@ class _HomeShellState extends State<HomeShell> {
 
   static const _screens = <Widget>[
     MapScreen(),
+    DrivingScreen(),
     CircleInfoScreen(asTab: true),
     SafetyScreen(),
     ChatScreen(embedded: true),
@@ -36,6 +38,11 @@ class _HomeShellState extends State<HomeShell> {
             icon: Icon(Icons.map_outlined),
             selectedIcon: Icon(Icons.map_rounded),
             label: 'Map',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.directions_car_outlined),
+            selectedIcon: Icon(Icons.directions_car_rounded),
+            label: 'Driving',
           ),
           NavigationDestination(
             icon: Icon(Icons.groups_outlined),
