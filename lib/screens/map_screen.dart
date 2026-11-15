@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as osm;
-import 'package:google_maps_flutter/google_maps_flutter.dart' as gm;
+import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mb;
 import 'package:latlong2/latlong.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:provider/provider.dart';
@@ -24,16 +24,15 @@ import 'member_detail_screen.dart';
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
 
-  /// Forces Google Maps on or off. Tests use this because Google Maps is a
-  /// native platform view that does not render in widget tests.
+  /// Forces the map provider on or off. Tests use this because native map
+  /// views do not render in widget tests.
   @visibleForTesting
-  static bool? useGoogleMapsOverride;
+  static bool? useMapProviderOverride;
 
-  /// Google Maps runs on Android and iOS. Desktop builds (Linux, Windows,
-  /// macOS) and the web build have no Google Maps SDK configured, so they keep
-  /// the OpenStreetMap fallback.
-  static bool get useGoogleMaps =>
-      useGoogleMapsOverride ??
+  /// Mapbox runs on Android and iOS. Desktop builds (Linux, Windows, macOS)
+  /// and the web build fall back to OpenStreetMap.
+  static bool get useMapbox =>
+      useMapProviderOverride ??
       (!kIsWeb &&
           (defaultTargetPlatform == TargetPlatform.android ||
               defaultTargetPlatform == TargetPlatform.iOS));
@@ -44,7 +43,8 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final osm.MapController _osmController = osm.MapController();
-  gm.GoogleMapController? _googleController;
+  late final mb.ViewportController _mapboxController = mb.ViewportController();
+  mb.MapboxMap? _mapboxMap;
   MapMarkerIcons? _markerIcons;
   bool _iconsLoading = false;
   bool _mapReady = false;
@@ -67,7 +67,8 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   void dispose() {
-    _googleController?.dispose();
+    _mapboxController.dispose();
+    _mapboxMap = null;
     super.dispose();
   }
 
@@ -84,14 +85,14 @@ class _MapScreenState extends State<MapScreen> {
       _firstMemberPosition(state) ??
       _worldCenter;
 
-  static gm.LatLng _toGoogle(LatLng point) =>
-      gm.LatLng(point.latitude, point.longitude);
+  static mb.Point _toMapbox(LatLng point) =>
+      mb.Point(coordinates: mb.Position(point.longitude, point.latitude));
 
   void _moveCamera(LatLng target, double zoom) {
     if (!_mapReady) return;
-    if (MapScreen.useGoogleMaps) {
-      _googleController?.animateCamera(
-        gm.CameraUpdate.newLatLngZoom(_toGoogle(target), zoom),
+    if (MapScreen.useMapbox) {
+      _mapboxController.moveTo(
+        mb.CameraViewportState(center: _toMapbox(target), zoom: zoom),
       );
     } else {
       _osmController.move(target, zoom);
@@ -170,8 +171,7 @@ class _MapScreenState extends State<MapScreen> {
           a.isCurrentUser == b.isCurrentUser ? 0 : (a.isCurrentUser ? -1 : 1),
     );
 
-  /// Paints any Google Maps marker bitmaps that are not cached yet, then
-  /// rebuilds so the markers pick them up.
+  /// Paints any map marker bitmaps that are not cached yet, then rebuilds so the markers pick them up.
   Future<void> _ensureMarkerIcons(AppState state) async {
     final icons = _markerIcons;
     if (icons == null || _iconsLoading) return;
@@ -207,72 +207,44 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
-  Set<gm.Marker> _googleMarkers(AppState state) {
+  Future<void> _mapboxMarkers(AppState state) async {
+    final mapboxMap = _mapboxMap;
+    if (mapboxMap == null) return;
     final icons = _markerIcons;
     final selectedId = state.selectedMember?.id;
     final members = _mapMembers(state);
-    return {
-      for (final place in state.places)
-        gm.Marker(
-          markerId: gm.MarkerId('place-${place.id}'),
-          position: _toGoogle(place.point),
-          anchor: const Offset(0.5, 0.5),
-          icon:
-              icons?.cached(MapMarkerIcons.placeKey(place)) ??
-              gm.BitmapDescriptor.defaultMarkerWithHue(
-                gm.BitmapDescriptor.hueViolet,
-              ),
-          infoWindow: gm.InfoWindow(title: place.name),
-          zIndexInt: 1,
+    for (final place in state.places) {
+      await mapboxMap.annotations.create(
+        mb.PointAnnotationOptions(
+          geometry: _toMapbox(place.point),
         ),
-      for (var i = 0; i < members.length; i++)
-        if (members[i].position != null)
-          gm.Marker(
-            markerId: gm.MarkerId('member-${members[i].id}'),
-            position: _toGoogle(members[i].position!),
-            anchor: const Offset(0.5, 0.36),
-            icon:
-                icons?.cached(
-                  MapMarkerIcons.memberKey(
-                    members[i],
-                    selected: members[i].id == selectedId,
-                  ),
-                ) ??
-                gm.BitmapDescriptor.defaultMarker,
-            consumeTapEvents: true,
-            onTap: () => _focusMember(members[i]),
-            // Selected member on top, then the current user.
-            zIndexInt: members[i].id == selectedId ? 100 : 50 - i,
-          ),
-    };
+      );
+    }
+    for (final member in members) {
+      final pos = member.position;
+      if (pos == null) continue;
+      await mapboxMap.annotations.create(
+        mb.PointAnnotationOptions(
+          geometry: _toMapbox(pos),
+        ),
+      );
+    }
   }
 
-  Widget _buildGoogleMap(AppState state) {
+  Widget _buildMapboxMap(AppState state) {
     final hasPosition = state.currentUserOrNull?.position != null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _ensureMarkerIcons(state);
     });
-    return gm.GoogleMap(
-      initialCameraPosition: gm.CameraPosition(
-        target: _toGoogle(_initialCenter(state)),
+    return mb.MapWidget(
+      styleUri: mb.MapboxStyles.STANDARD,
+      viewport: mb.CameraViewportState(
+        center: _toMapbox(_initialCenter(state)),
         zoom: hasPosition ? 15 : 3,
       ),
-      style: state.mapDark ? googleMapDarkStyle : null,
-      markers: _googleMarkers(state),
-      minMaxZoomPreference: const gm.MinMaxZoomPreference(2, 20),
-      rotateGesturesEnabled: false,
-      myLocationButtonEnabled: false,
-      zoomControlsEnabled: false,
-      mapToolbarEnabled: false,
-      compassEnabled: false,
-      // Keep the Google logo and markers clear of the floating overlays.
-      padding: EdgeInsets.only(
-        top: MediaQuery.paddingOf(context).top + 80,
-        bottom: _panelHeight,
-      ),
-      onTap: (_) => state.selectMember(null),
-      onMapCreated: (controller) {
-        _googleController = controller;
+      viewportController: _mapboxController,
+      onMapCreated: (mapboxMap) {
+        _mapboxMap = mapboxMap;
         _mapReady = true;
         if (mounted) setState(() {});
       },
@@ -347,8 +319,8 @@ class _MapScreenState extends State<MapScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          if (MapScreen.useGoogleMaps)
-            _buildGoogleMap(state)
+          if (MapScreen.useMapbox)
+            _buildMapboxMap(state)
           else
             _buildOsmMap(state),
           Positioned(
@@ -407,7 +379,7 @@ class _MapScreenState extends State<MapScreen> {
                     state: state,
                     selected: selected,
                     minimized: _panelMinimized,
-                    showOsmAttribution: !MapScreen.useGoogleMaps,
+                    showOsmAttribution: !MapScreen.useMapbox,
                     onToggleMinimized: () =>
                         setState(() => _panelMinimized = !_panelMinimized),
                     onSelect: _focusMember,
