@@ -8,6 +8,7 @@ Built with Flutter and [Supabase](https://supabase.com) (auth, Postgres, realtim
 
 - **Circles**: create a circle or join one with an invite code
 - **Live map**: see circle members' locations, battery level and last update; get directions to a member
+- **Driving**: see who is moving, their speed and heading, and their likely destination
 - **Places**: geofences that send arrival and departure alerts
 - **Safety**: SOS alerts, low-battery alerts, invite sharing
 - **Chat**: real-time circle chat
@@ -23,7 +24,7 @@ lib/
   config.dart             Supabase keys, OAuth redirect, plan limits, legal details
   state/app_state.dart    Single Provider: auth, circle, realtime, location, alerts, chat
   models/                 Circle, Member, Place, Message, AlertEvent, Profile
-  screens/                Startup, auth, circle setup, home shell, legal, subscription
+  screens/                Startup, auth, circle setup, home shell, driving, legal, subscription
   services/               RevenueCat subscription wrapper
   widgets/                Shared UI (avatars, logo, banners)
 assets/legal/             Privacy Policy, Terms of Service and copyright text

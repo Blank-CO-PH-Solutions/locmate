@@ -1,3 +1,4 @@
+import 'package:intl/intl.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:provider/provider.dart';
 import 'package:purchases_flutter/purchases_flutter.dart';
@@ -237,7 +238,14 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                                 ? '${state.trialDaysLeft} days left. Upgrade '
                                       'any time to keep unlimited members and places.'
                                 : active
-                                ? 'Your circle has unlimited members and places.'
+                                ? [
+                                    'Your circle has unlimited members and places.',
+                                    if (state.subscriptionStore != null)
+                                      'Source: ${_storeLabel(state.subscriptionStore!)}',
+                                    if (state.subscriptionExpiresAt != null)
+                                      'Valid until '
+                                          '${DateFormat.yMMMd().format(state.subscriptionExpiresAt!)}',
+                                  ].join('\n')
                                 : 'Up to ${PlanLimits.freeMembers} members and '
                                       '${PlanLimits.freePlaces} places per circle.',
                             style: TextStyle(
@@ -773,3 +781,10 @@ class _LegalLink extends StatelessWidget {
     );
   }
 }
+
+String _storeLabel(String store) => switch (store) {
+  'app_store' => 'Apple App Store',
+  'play_store' => 'Google Play',
+  'paymongo' => 'locmate.app web purchase',
+  _ => store,
+};

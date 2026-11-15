@@ -133,6 +133,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   DateTime? trialEndsAt;
   int trialDaysLeft = 0;
 
+  /// The signed-in user's own paid Premium (store subscription or a
+  /// locmate.app web pass). Shown on the subscription screen.
+  DateTime? subscriptionExpiresAt;
+  String? subscriptionStore;
+
   /// True when the account still uses a temporary password. The app blocks the
   /// rest of the UI until the user chooses a new one.
   bool mustChangePassword = false;
@@ -489,6 +494,26 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       trialEndsAt = trialEnds is String
           ? DateTime.tryParse(trialEnds)?.toLocal()
           : null;
+      final uid = _client.auth.currentUser?.id;
+      if (uid != null) {
+        final rows = await _client
+            .from('subscriptions')
+            .select('expires_at, store')
+            .eq('user_id', uid)
+            .order('expires_at', ascending: false, nullsFirst: false)
+            .limit(1);
+        if (rows.isNotEmpty) {
+          final row = _asMap(rows.first);
+          final expires = row['expires_at'];
+          subscriptionExpiresAt = expires is String
+              ? DateTime.tryParse(expires)?.toLocal()
+              : null;
+          subscriptionStore = row['store'] as String?;
+        } else {
+          subscriptionExpiresAt = null;
+          subscriptionStore = null;
+        }
+      }
     } catch (_) {
       // Keep the last known plan; the server still enforces limits.
     }
