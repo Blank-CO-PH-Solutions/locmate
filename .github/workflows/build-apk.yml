@@ -6,7 +6,6 @@
 #                              (base64 -w0 ~/locmate-release.jks)
 #   ANDROID_KEYSTORE_PASSWORD  the store/key password (from android/key.properties)
 #   ANDROID_KEY_ALIAS          key alias, e.g. locmate
-#   GOOGLE_MAPS_API_KEY        Android Maps SDK key (blank map without it)
 #
 # Without the keystore secrets the APK is signed with the debug key
 # (same fallback as locally), so the workflow still succeeds.
@@ -68,12 +67,15 @@ jobs:
           storeFile=$RUNNER_TEMP/release.jks
           EOF
 
-      - name: Build release APK
-        env:
-          MAPBOX_ACCESS_TOKEN: ${{ secrets.MAPBOX_ACCESS_TOKEN }}
+      - name: Run tests
         run: |
           flutter pub get
-          flutter build apk --release --dart-define=ACCESS_TOKEN="$MAPBOX_ACCESS_TOKEN"
+          flutter test
+
+      - name: Build release APK
+        run: |
+          flutter pub get
+          flutter build apk --release
 
       - name: Summarize
         run: |

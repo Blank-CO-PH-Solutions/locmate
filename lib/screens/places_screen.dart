@@ -1,10 +1,12 @@
 import 'package:material_ui/material_ui.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../config.dart';
 import '../models/member.dart';
 import '../models/place.dart';
+import '../services/maps_service.dart';
 import '../state/app_state.dart';
 import '../theme.dart';
 import '../utils.dart';
@@ -79,6 +81,7 @@ class PlacesScreen extends StatelessWidget {
                 child: _PlaceCard(
                   place: place,
                   members: state.membersAtPlace(place),
+                  onDirections: () => _openDirections(context, place),
                   onRemove: () => _confirmRemove(context, place),
                 ),
               ),
@@ -156,6 +159,31 @@ class PlacesScreen extends StatelessWidget {
           const SnackBar(content: Text('Place added to your circle')),
         );
     }
+  }
+
+  Future<void> _openDirections(BuildContext context, Place place) async {
+    final state = context.read<AppState>();
+    final uri = MapsService.directionsUri(
+      destination: place.point,
+      origin: state.currentUserOrNull?.position,
+    );
+    var launched = false;
+    try {
+      launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      launched = false;
+    }
+    if (!context.mounted || launched) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            'Could not open Google Maps. ${place.name} is at '
+            '${formatCoordinates(place.point)}.',
+          ),
+        ),
+      );
   }
 
   Future<bool?> _showUpgradeDialog(BuildContext context, AppState state) {
@@ -290,11 +318,13 @@ class _PlaceCard extends StatelessWidget {
   const _PlaceCard({
     required this.place,
     required this.members,
+    required this.onDirections,
     required this.onRemove,
   });
 
   final Place place;
   final List<Member> members;
+  final VoidCallback onDirections;
   final VoidCallback onRemove;
 
   @override
@@ -385,8 +415,24 @@ class _PlaceCard extends StatelessWidget {
               Icons.more_horiz_rounded,
               color: scheme.onSurfaceVariant,
             ),
-            onSelected: (_) => onRemove(),
+            onSelected: (value) {
+              if (value == 'directions') {
+                onDirections();
+              } else if (value == 'remove') {
+                onRemove();
+              }
+            },
             itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'directions',
+                child: Row(
+                  children: [
+                    Icon(Icons.directions_rounded, size: 18),
+                    SizedBox(width: 8),
+                    Text('Directions in Google Maps'),
+                  ],
+                ),
+              ),
               PopupMenuItem(
                 value: 'remove',
                 child: Row(
@@ -501,16 +547,90 @@ class _AddPlaceSheetState extends State<_AddPlaceSheet> {
 
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _addressController = TextEditingController();
+  final TextEditingController _searchController = TextEditingController();
   String _category = 'home';
   double _radius = 180;
   String? _error;
   bool _saving = false;
+  bool _lookingUp = false;
+
+  /// The place starts at the member's current position and can be moved by
+  /// searching for an address with OpenStreetMap Nominatim.
+  late LatLng _point = widget.point;
+
+  @override
+  void initState() {
+    super.initState();
+    _fillAddressFromPoint();
+  }
 
   @override
   void dispose() {
     _nameController.dispose();
     _addressController.dispose();
+    _searchController.dispose();
     super.dispose();
+  }
+
+  Future<void> _fillAddressFromPoint() async {
+    try {
+      final result = await MapsService.reverseGeocode(_point);
+      if (!mounted || result == null) return;
+      if (_addressController.text.trim().isEmpty) {
+        _addressController.text = result.formattedAddress;
+      }
+    } on PlaceSearchException {
+      // The address is optional. Keep the coordinate label if the lookup is
+      // unavailable (for example while offline).
+    }
+  }
+
+  Future<void> _searchAddress() async {
+    final query = _searchController.text.trim();
+    if (query.isEmpty || _lookingUp) return;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _lookingUp = true;
+      _error = null;
+    });
+    try {
+      final results = await MapsService.searchAddress(query);
+      if (!mounted) return;
+      if (results.isEmpty) {
+        setState(() {
+          _lookingUp = false;
+          _error = 'No place found for “$query”. Try a fuller address.';
+        });
+        return;
+      }
+      final result = results.first;
+      setState(() {
+        _point = result.point;
+        _addressController.text = result.formattedAddress;
+        _lookingUp = false;
+      });
+    } on PlaceSearchException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _lookingUp = false;
+        _error = error.message;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _lookingUp = false;
+        _error = friendlyError(error);
+      });
+    }
+  }
+
+  void _useCurrentLocation() {
+    setState(() {
+      _point = widget.point;
+      _addressController.clear();
+      _error = null;
+    });
+    _fillAddressFromPoint();
   }
 
   Future<void> _save() async {
@@ -528,7 +648,7 @@ class _AddPlaceSheetState extends State<_AddPlaceSheet> {
         name: name,
         category: _category,
         address: _addressController.text.trim(),
-        point: widget.point,
+        point: _point,
         radiusMeters: _radius,
       );
       if (mounted) Navigator.of(context).pop(true);
@@ -591,8 +711,8 @@ class _AddPlaceSheetState extends State<_AddPlaceSheet> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'Pinned to your current location · '
-                      '${formatCoordinates(widget.point)}',
+                      'Pinned to ${formatCoordinates(_point)} · '
+                      'Tap “Use my location” to reset.',
                       style: TextStyle(
                         fontSize: 11,
                         height: 1.35,
@@ -600,10 +720,56 @@ class _AddPlaceSheetState extends State<_AddPlaceSheet> {
                       ),
                     ),
                   ),
+                  TextButton(
+                    onPressed: _saving ? null : _useCurrentLocation,
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 30),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                    child: const Text('Use my location'),
+                  ),
                 ],
               ),
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _searchController,
+                    textInputAction: TextInputAction.search,
+                    onSubmitted: (_) => _searchAddress(),
+                    decoration: const InputDecoration(
+                      hintText: 'Search an address or landmark',
+                      prefixIcon: Icon(Icons.search_rounded),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filled(
+                  onPressed: _lookingUp ? null : _searchAddress,
+                  tooltip: 'Search for an address',
+                  icon: _lookingUp
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.travel_explore_rounded),
+                ),
+              ],
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 4, left: 4),
+              child: Text(
+                'Address search © OpenStreetMap contributors',
+                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+              ),
+            ),
+            const SizedBox(height: 10),
             TextField(
               controller: _nameController,
               textCapitalization: TextCapitalization.words,

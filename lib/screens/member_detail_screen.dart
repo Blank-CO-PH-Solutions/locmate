@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../models/alert_event.dart';
 import '../models/member.dart';
+import '../services/maps_service.dart';
 import '../state/app_state.dart';
 import '../theme.dart';
 import '../utils.dart';
@@ -57,8 +58,10 @@ class MemberDetailScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 6),
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
                     decoration: BoxDecoration(
                       color: scheme.primary.withValues(alpha: 0.09),
                       borderRadius: BorderRadius.circular(20),
@@ -74,8 +77,8 @@ class MemberDetailScreen extends StatelessWidget {
                             color: member.isMoving
                                 ? LocmateColors.safe
                                 : member.isSharing
-                                    ? scheme.primary
-                                    : LocmateColors.muted,
+                                ? scheme.primary
+                                : LocmateColors.muted,
                           ),
                         ),
                         const SizedBox(width: 6),
@@ -150,8 +153,8 @@ class MemberDetailScreen extends StatelessWidget {
                     value: member.motion == MotionState.driving
                         ? '${(member.speed * 2.23694).round()} mph'
                         : member.motion == MotionState.walking
-                            ? 'Walking'
-                            : 'Still',
+                        ? 'Walking'
+                        : 'Still',
                     color: scheme.primary,
                   ),
                 ),
@@ -185,10 +188,10 @@ class MemberDetailScreen extends StatelessWidget {
                               !member.isSharing
                                   ? 'Location paused'
                                   : place != null
-                                      ? place.name
-                                      : member.position != null
-                                          ? 'On the map'
-                                          : 'Not available yet',
+                                  ? place.name
+                                  : member.position != null
+                                  ? 'On the map'
+                                  : 'Not available yet',
                               style: const TextStyle(
                                 fontSize: 14.5,
                                 fontWeight: FontWeight.w700,
@@ -206,7 +209,8 @@ class MemberDetailScreen extends StatelessWidget {
                         ),
                       ),
                       IconButton(
-                        onPressed: () => _refreshLocation(context, state, member),
+                        onPressed: () =>
+                            _refreshLocation(context, state, member),
                         tooltip: 'Refresh location',
                         icon: Icon(
                           Icons.my_location_rounded,
@@ -269,8 +273,8 @@ class MemberDetailScreen extends StatelessWidget {
                         member.isCurrentUser
                             ? 'This is you'
                             : distance == null
-                                ? 'Distance unavailable'
-                                : '${formatDistance(distance)} away from you',
+                            ? 'Distance unavailable'
+                            : '${formatDistance(distance)} away from you',
                         style: TextStyle(
                           fontSize: 11.5,
                           color: scheme.onSurfaceVariant,
@@ -349,9 +353,10 @@ class MemberDetailScreen extends StatelessWidget {
         );
       return;
     }
-    final uri = Uri.parse(
-      'https://www.google.com/maps/dir/?api=1&destination='
-      '${member.position!.latitude},${member.position!.longitude}',
+    final state = context.read<AppState>();
+    final uri = MapsService.directionsUri(
+      destination: member.position!,
+      origin: state.currentUserOrNull?.position,
     );
     var launched = false;
     try {

@@ -7,12 +7,12 @@ Built with Flutter and [Supabase](https://supabase.com) (auth, Postgres, realtim
 ## Features
 
 - **Circles**: create a circle or join one with an invite code
-- **Live map**: see circle members' locations, battery level and last update; get directions to a member
+- **Live map**: open a member's location, see their battery level and last update, and get directions to them
 - **Driving**: see who is moving, their speed and heading, and their likely destination
 - **Places**: geofences that send arrival and departure alerts
 - **Safety**: SOS alerts, low-battery alerts, invite sharing
 - **Chat**: real-time circle chat
-- **Settings**: location sharing toggle, battery saver, dark mode for the app and the map
+- **Settings**: location sharing toggle, battery saver, dark mode (the dark map style is desktop-only)
 - **Sign-in**: email and password, or Google
 - **Premium**: unlimited members and places, low-battery alerts, subscriptions through RevenueCat
 
@@ -49,6 +49,33 @@ flutter run \
 ```
 
 Apply the database schema in `supabase/migrations/` to your Supabase project (for example with `supabase db push`).
+
+### Map setup
+
+No API key or Google Cloud configuration is required.
+
+- **Android, iOS and web** render Google Maps' public, keyless
+  `https://www.google.com/maps?q=<lat>,<lng>&output=embed` URL in a WebView
+  (`webview_flutter`) or iframe (`webview_flutter_web`).
+- **Desktop builds** (Linux, Windows, macOS) use the bundled OpenStreetMap
+  `flutter_map` layer, which also shows every member pin and place geofence on
+  one map.
+- **Place search and reverse geocoding** use
+  [OpenStreetMap Nominatim](https://nominatim.org/), which needs no key. The app
+  identifies itself with a User-Agent and contact email in `MapsConfig`
+  (`lib/config.dart`); respect Nominatim's
+  [usage policy](https://operations.osmfoundation.org/policies/nominatim/)
+  (at most one request per second and no bulk geocoding) if you extend it.
+- **Directions** open `google.com/maps` deep links in the installed Google Maps
+  app or the browser.
+
+Because the in-app map is an embed, it shows one centered location at a time
+(the selected member, or you after recentering). Multiple member pins and place
+geofence circles are only drawn on the desktop OpenStreetMap fallback.
+
+To use the full Google Maps SDK with live markers instead, add your own key and
+restore the `google_maps_flutter` integration (billing must be enabled on the
+Google Cloud project).
 
 ### Google sign-in setup
 

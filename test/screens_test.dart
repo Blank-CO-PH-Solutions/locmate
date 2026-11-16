@@ -351,8 +351,8 @@ void main() {
 
     final state = _readyState();
     // Google Maps is a native platform view that cannot render in tests.
-    MapScreen.useMapProviderOverride = false;
-    addTearDown(() => MapScreen.useMapProviderOverride = null);
+    MapScreen.useGoogleMapsOverride = false;
+    addTearDown(() => MapScreen.useGoogleMapsOverride = null);
     try {
       await tester.pumpWidget(
         ChangeNotifierProvider<AppState>.value(
@@ -382,8 +382,8 @@ void main() {
     addTearDown(tester.view.reset);
 
     final state = _readyState();
-    MapScreen.useMapProviderOverride = false;
-    addTearDown(() => MapScreen.useMapProviderOverride = null);
+    MapScreen.useGoogleMapsOverride = false;
+    addTearDown(() => MapScreen.useGoogleMapsOverride = null);
     try {
       await tester.pumpWidget(_wrap(state, const MapScreen()));
       await tester.pump(const Duration(milliseconds: 300));

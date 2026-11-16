@@ -12,7 +12,6 @@ dependencies:
     sdk: flutter
   flutter_map: ^8.3.2
   geolocator: ^14.1.2
-  mapbox_maps_flutter: ^3.35.0
   http: ^1.6.0
   intl: ^0.20.3
   latlong2: ^0.10.1
@@ -24,6 +23,8 @@ dependencies:
   url_launcher: ^6.3.3
   uuid: ^4.6.0
   vibration: ^3.2.1
+  webview_flutter: ^4.14.1
+  webview_flutter_web: ^0.2.3+4
 
 dev_dependencies:
   flutter_test:

@@ -1,10 +1,11 @@
 import java.util.Properties
 import java.io.FileInputStream
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
-    id("org.jetbrains.kotlin.android") version "1.8.22"
+    id("org.jetbrains.kotlin.android")
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -13,23 +14,10 @@ plugins {
 // still works. See README.md → "Release signing".
 val keystorePropertiesFile = rootProject.file("key.properties")
 val keystoreProperties = Properties()
+
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
-
-// Google Maps SDK key. Set GOOGLE_MAPS_API_KEY in android/local.properties
-// (gitignored) or export it in the environment. Leave empty until the key is
-// created; the map then shows Google's "this app is not authorized" notice.
-// See README.md → "Google Maps".
-val localProperties = Properties()
-val localPropertiesFile = rootProject.file("local.properties")
-if (localPropertiesFile.exists()) {
-    localProperties.load(FileInputStream(localPropertiesFile))
-}
-val googleMapsApiKey: String =
-    localProperties["GOOGLE_MAPS_API_KEY"] as String?
-        ?: System.getenv("GOOGLE_MAPS_API_KEY")
-        ?: ""
 
 android {
     namespace = "com.locmate.locmate"
@@ -43,13 +31,10 @@ android {
 
     defaultConfig {
         applicationId = "com.locmate.locmate"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        manifestPlaceholders["GOOGLE_MAPS_API_KEY"] = googleMapsApiKey
     }
 
     signingConfigs {
@@ -65,18 +50,20 @@ android {
 
     buildTypes {
         release {
-            signingConfig = if (keystorePropertiesFile.exists()) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
-            }
+            signingConfig =
+                if (keystorePropertiesFile.exists()) {
+                    signingConfigs.getByName("release")
+                } else {
+                    signingConfigs.getByName("debug")
+                }
         }
     }
 }
 
-kotlin {
+// Configure Kotlin compilation without the kotlin {} DSL block.
+tasks.withType<KotlinCompile>().configureEach {
     compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        jvmTarget.set(JvmTarget.JVM_17)
     }
 }
 

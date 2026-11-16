@@ -186,26 +186,31 @@ class CircleInfoScreen extends StatelessWidget {
                       child: Column(
                         children: [
                           for (final member in state.members)
-                            ListTile(
-                              onTap: () => _openMember(context, member),
-                              leading: MemberAvatar(member: member, size: 40),
-                              title: Text(
-                                member.isCurrentUser
-                                    ? '${member.name} (You)'
-                                    : member.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w700,
+                            // Give each tile its own Material so ink splashes
+                            // are not hidden by the card's background.
+                            Material(
+                              type: MaterialType.transparency,
+                              child: ListTile(
+                                onTap: () => _openMember(context, member),
+                                leading: MemberAvatar(member: member, size: 40),
+                                title: Text(
+                                  member.isCurrentUser
+                                      ? '${member.name} (You)'
+                                      : member.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                  ),
                                 ),
+                                subtitle: Text(
+                                  '${member.isOwner ? 'Owner' : 'Member'} · '
+                                  '${state.statusFor(member)}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                trailing: BatteryBadge(level: member.battery),
                               ),
-                              subtitle: Text(
-                                '${member.isOwner ? 'Owner' : 'Member'} · '
-                                '${state.statusFor(member)}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              trailing: BatteryBadge(level: member.battery),
                             ),
                         ],
                       ),

@@ -1,21 +1,20 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as osm;
-import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mb;
 import 'package:latlong2/latlong.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:provider/provider.dart';
 
+import '../config.dart';
 import '../models/member.dart';
 import '../models/place.dart';
 import '../state/app_state.dart';
 import '../theme.dart';
 import '../utils.dart';
 import '../widgets/common.dart';
-import '../widgets/map_marker_icons.dart';
+import '../widgets/google_map_embed.dart';
 import '../widgets/member_avatar.dart';
 import 'chat_screen.dart';
 import 'circle_info_screen.dart';
@@ -24,18 +23,16 @@ import 'member_detail_screen.dart';
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
 
-  /// Forces the map provider on or off. Tests use this because native map
-  /// views do not render in widget tests.
+  /// Forces the embedded Google Maps view on or off. Tests use this because
+  /// the WebView renderer does not work in widget tests.
   @visibleForTesting
-  static bool? useMapProviderOverride;
+  static bool? useGoogleMapsOverride;
 
-  /// Mapbox runs on Android and iOS. Desktop builds (Linux, Windows, macOS)
-  /// and the web build fall back to OpenStreetMap.
-  static bool get useMapbox =>
-      useMapProviderOverride ??
-      (!kIsWeb &&
-          (defaultTargetPlatform == TargetPlatform.android ||
-              defaultTargetPlatform == TargetPlatform.iOS));
+  /// The keyless Google Maps embed runs on Android, iOS and the web. Desktop
+  /// builds (Linux, Windows, macOS) have no WebView implementation, so they
+  /// keep the OpenStreetMap fallback.
+  static bool get useGoogleMaps =>
+      useGoogleMapsOverride ?? MapsConfig.usesEmbeddedMap;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
@@ -43,10 +40,8 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final osm.MapController _osmController = osm.MapController();
-  late final mb.ViewportController _mapboxController = mb.ViewportController();
-  mb.MapboxMap? _mapboxMap;
-  MapMarkerIcons? _markerIcons;
-  bool _iconsLoading = false;
+  LatLng? _embedCenter;
+  double _embedZoom = 15;
   bool _mapReady = false;
   bool _autoCentered = false;
   bool _panelMinimized = false;
@@ -55,22 +50,6 @@ class _MapScreenState extends State<MapScreen> {
   static const String _tilesUrl =
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
   static const LatLng _worldCenter = LatLng(20, 0);
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final ratio = MediaQuery.devicePixelRatioOf(context);
-    if (_markerIcons?.pixelRatio != ratio) {
-      _markerIcons = MapMarkerIcons(pixelRatio: ratio);
-    }
-  }
-
-  @override
-  void dispose() {
-    _mapboxController.dispose();
-    _mapboxMap = null;
-    super.dispose();
-  }
 
   LatLng? _firstMemberPosition(AppState state) {
     for (final member in state.members) {
@@ -85,16 +64,13 @@ class _MapScreenState extends State<MapScreen> {
       _firstMemberPosition(state) ??
       _worldCenter;
 
-  static mb.Point _toMapbox(LatLng point) =>
-      mb.Point(coordinates: mb.Position(point.longitude, point.latitude));
-
   void _moveCamera(LatLng target, double zoom) {
-    if (!_mapReady) return;
-    if (MapScreen.useMapbox) {
-      _mapboxController.moveTo(
-        mb.CameraViewportState(center: _toMapbox(target), zoom: zoom),
-      );
-    } else {
+    if (MapScreen.useGoogleMaps) {
+      setState(() {
+        _embedCenter = target;
+        _embedZoom = zoom;
+      });
+    } else if (_mapReady) {
       _osmController.move(target, zoom);
     }
   }
@@ -171,84 +147,16 @@ class _MapScreenState extends State<MapScreen> {
           a.isCurrentUser == b.isCurrentUser ? 0 : (a.isCurrentUser ? -1 : 1),
     );
 
-  /// Paints any map marker bitmaps that are not cached yet, then
-  /// rebuilds so the markers pick them up.
-  Future<void> _ensureMarkerIcons(AppState state) async {
-    final icons = _markerIcons;
-    if (icons == null || _iconsLoading) return;
-    final selectedId = state.selectedMember?.id;
-    final missingMembers = [
-      for (final member in state.members)
-        if (member.position != null &&
-            icons.cached(
-                  MapMarkerIcons.memberKey(
-                    member,
-                    selected: member.id == selectedId,
-                  ),
-                ) ==
-                null)
-          member,
-    ];
-    final missingPlaces = [
-      for (final place in state.places)
-        if (icons.cached(MapMarkerIcons.placeKey(place)) == null) place,
-    ];
-    if (missingMembers.isEmpty && missingPlaces.isEmpty) return;
-    _iconsLoading = true;
-    try {
-      for (final member in missingMembers) {
-        await icons.member(member, selected: member.id == selectedId);
-      }
-      for (final place in missingPlaces) {
-        await icons.place(place);
-      }
-    } finally {
-      _iconsLoading = false;
+  Widget _buildEmbedMap(AppState state) {
+    // Pin the first camera position so live location updates do not reload the
+    // WebView; only explicit camera moves change it afterwards.
+    if (_embedCenter == null) {
+      _embedCenter = _initialCenter(state);
+      _embedZoom = _embedCenter == _worldCenter ? 3 : 15;
     }
-    if (mounted) setState(() {});
-  }
-
-  Future<void> _mapboxMarkers(AppState state) async {
-    final mapboxMap = _mapboxMap;
-    if (mapboxMap == null) return;
-    final icons = _markerIcons;
-    final selectedId = state.selectedMember?.id;
-    final members = _mapMembers(state);
-    for (final place in state.places) {
-      await mapboxMap.annotations.create(
-        mb.PointAnnotationOptions(
-          geometry: _toMapbox(place.point),
-        ),
-      );
-    }
-    for (final member in members) {
-      final pos = member.position;
-      if (pos == null) continue;
-      await mapboxMap.annotations.create(
-        mb.PointAnnotationOptions(
-          geometry: _toMapbox(pos),
-        ),
-      );
-    }
-  }
-
-  Widget _buildMapboxMap(AppState state) {
-    final hasPosition = state.currentUserOrNull?.position != null;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _ensureMarkerIcons(state);
-    });
-    return mb.MapWidget(
-      styleUri: mb.MapboxStyles.STANDARD,
-      viewport: mb.CameraViewportState(
-        center: _toMapbox(_initialCenter(state)),
-        zoom: hasPosition ? 15 : 3,
-      ),
-      viewportController: _mapboxController,
-      onMapCreated: (mapboxMap) {
-        _mapboxMap = mapboxMap;
-        _mapReady = true;
-        if (mounted) setState(() {});
-      },
+    return Padding(
+      padding: EdgeInsets.only(bottom: _panelHeight),
+      child: GoogleMapEmbed(center: _embedCenter!, zoom: _embedZoom),
     );
   }
 
@@ -272,6 +180,19 @@ class _MapScreenState extends State<MapScreen> {
           urlTemplate: _tilesUrl,
           userAgentPackageName: 'com.locmate.locmate',
           tileBuilder: state.mapDark ? osm.darkModeTileBuilder : null,
+        ),
+        osm.CircleLayer(
+          circles: [
+            for (final place in state.places)
+              osm.CircleMarker(
+                point: place.point,
+                radius: place.radiusMeters,
+                useRadiusInMeter: true,
+                color: placeColor(place.icon).withValues(alpha: 0.11),
+                borderColor: placeColor(place.icon).withValues(alpha: 0.55),
+                borderStrokeWidth: 2,
+              ),
+          ],
         ),
         osm.MarkerLayer(
           markers: [
@@ -306,7 +227,7 @@ class _MapScreenState extends State<MapScreen> {
     final state = context.watch<AppState>();
     final selected = state.selectedMember;
 
-    if (!_autoCentered && _mapReady) {
+    if (!_autoCentered && (MapScreen.useGoogleMaps || _mapReady)) {
       final position = state.currentUserOrNull?.position;
       if (position != null) {
         _autoCentered = true;
@@ -320,8 +241,8 @@ class _MapScreenState extends State<MapScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          if (MapScreen.useMapbox)
-            _buildMapboxMap(state)
+          if (MapScreen.useGoogleMaps)
+            _buildEmbedMap(state)
           else
             _buildOsmMap(state),
           Positioned(
@@ -380,7 +301,7 @@ class _MapScreenState extends State<MapScreen> {
                     state: state,
                     selected: selected,
                     minimized: _panelMinimized,
-                    showOsmAttribution: !MapScreen.useMapbox,
+                    showOsmAttribution: !MapScreen.useGoogleMaps,
                     onToggleMinimized: () =>
                         setState(() => _panelMinimized = !_panelMinimized),
                     onSelect: _focusMember,
@@ -727,12 +648,14 @@ class _CirclePanel extends StatelessWidget {
           onTap: onOpenCircle,
         ),
         const SizedBox(width: 6),
-        _MapToolButton(
-          icon: Icons.layers_outlined,
-          tooltip: state.mapDark ? 'Light map' : 'Dark map',
-          onTap: state.toggleMapDark,
-        ),
-        const SizedBox(width: 6),
+        if (!MapScreen.useGoogleMaps) ...[
+          _MapToolButton(
+            icon: Icons.layers_outlined,
+            tooltip: state.mapDark ? 'Light map' : 'Dark map',
+            onTap: state.toggleMapDark,
+          ),
+          const SizedBox(width: 6),
+        ],
         _MapToolButton(
           icon: Icons.my_location_rounded,
           tooltip: 'Recenter on me',
@@ -1103,7 +1026,7 @@ class _MemberCard extends StatelessWidget {
                     Expanded(
                       child: Text(
                         member.isCurrentUser
-                            ? '${member.firstName} (You)'
+                            ? '${member.name} (You)'
                             : member.name,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
