@@ -264,14 +264,13 @@ class SettingsScreen extends StatelessWidget {
                         value: state.darkMode,
                         onChanged: state.setDarkMode,
                       ),
-                      if (!MapsConfig.usesEmbeddedMap)
-                        _ToggleTile(
-                          icon: Icons.layers_outlined,
-                          title: 'Dark map style',
-                          subtitle: 'Use the dark OpenStreetMap tiles',
-                          value: state.mapDark,
-                          onChanged: (_) => state.toggleMapDark(),
-                        ),
+                      _ToggleTile(
+                        icon: Icons.layers_outlined,
+                        title: 'Dark map style',
+                        subtitle: 'Use the dark OpenStreetMap tiles',
+                        value: state.mapDark,
+                        onChanged: (_) => state.toggleMapDark(),
+                      ),
                     ],
                   ),
                   const SectionLabel('Circle members'),

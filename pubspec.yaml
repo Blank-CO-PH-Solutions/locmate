@@ -23,8 +23,6 @@ dependencies:
   url_launcher: ^6.3.3
   uuid: ^4.6.0
   vibration: ^3.2.1
-  webview_flutter: ^4.14.1
-  webview_flutter_web: ^0.2.3+4
 
 dev_dependencies:
   flutter_test:

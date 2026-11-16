@@ -1,5 +1,3 @@
-import 'package:flutter/foundation.dart';
-
 /// Supabase project configuration.
 ///
 /// The values below are the public project URL and the public anon key. They
@@ -35,16 +33,12 @@ class SupabaseConfig {
 
 /// Map configuration.
 ///
-/// The map and place lookup use keyless services so there is nothing to
-/// configure per environment:
+/// The in-app map uses OpenStreetMap tiles via `flutter_map` on every platform,
+/// so there is nothing to configure per environment:
 ///
-/// * In-app map: Google Maps' public `output=embed` URL, loaded in a WebView
-///   (Android/iOS) or iframe (web).
+/// * Map tiles: OpenStreetMap (keyless).
 /// * Place search/reverse geocoding: OpenStreetMap Nominatim.
 /// * Directions: Google Maps deep links.
-///
-/// Desktop builds (Linux, Windows, macOS) keep the OpenStreetMap `flutter_map`
-/// layer, which also renders every member pin and place geofence.
 class MapsConfig {
   const MapsConfig._();
 
@@ -53,15 +47,6 @@ class MapsConfig {
 
   /// Contact address sent with Nominatim requests (recommended by its policy).
   static const String contactEmail = 'hello@blankcoph.solutions';
-
-  /// Whether this build renders the keyless Google Maps embed (WebView on
-  /// Android/iOS, iframe on web) instead of the desktop OpenStreetMap layer.
-  /// Desktop builds keep OpenStreetMap so every member pin and place geofence
-  /// stays visible on one map.
-  static bool get usesEmbeddedMap =>
-      kIsWeb ||
-      defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS;
 }
 
 /// RevenueCat (subscriptions) configuration. The public SDK keys come from

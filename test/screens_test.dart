@@ -350,9 +350,6 @@ void main() {
     addTearDown(tester.view.reset);
 
     final state = _readyState();
-    // Google Maps is a native platform view that cannot render in tests.
-    MapScreen.useGoogleMapsOverride = false;
-    addTearDown(() => MapScreen.useGoogleMapsOverride = null);
     try {
       await tester.pumpWidget(
         ChangeNotifierProvider<AppState>.value(
@@ -382,8 +379,6 @@ void main() {
     addTearDown(tester.view.reset);
 
     final state = _readyState();
-    MapScreen.useGoogleMapsOverride = false;
-    addTearDown(() => MapScreen.useGoogleMapsOverride = null);
     try {
       await tester.pumpWidget(_wrap(state, const MapScreen()));
       await tester.pump(const Duration(milliseconds: 300));
@@ -405,6 +400,45 @@ void main() {
 
       expect(find.byTooltip('Minimize panel'), findsOneWidget);
       expect(find.textContaining('Jordan Lee'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    } finally {
+      state.dispose();
+    }
+  });
+
+  testWidgets('map exposes zoom, compass, fit and follow controls', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final state = _readyState();
+    try {
+      await tester.pumpWidget(_wrap(state, const MapScreen()));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byTooltip('Zoom in'), findsOneWidget);
+      expect(find.byTooltip('Zoom out'), findsOneWidget);
+      expect(find.byTooltip('Reset north (0°)'), findsOneWidget);
+      expect(find.byTooltip('Show everyone'), findsWidgets);
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Tooltip &&
+              (widget.message == 'Follow me' ||
+                  widget.message == 'Following you'),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byTooltip('Zoom in'));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.byTooltip('Zoom out'));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.byTooltip('Reset north (0°)'));
+      await tester.pump(const Duration(milliseconds: 100));
+
       expect(tester.takeException(), isNull);
     } finally {
       state.dispose();

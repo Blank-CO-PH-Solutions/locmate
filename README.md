@@ -54,12 +54,14 @@ Apply the database schema in `supabase/migrations/` to your Supabase project (fo
 
 No API key or Google Cloud configuration is required.
 
-- **Android, iOS and web** render Google Maps' public, keyless
-  `https://www.google.com/maps?q=<lat>,<lng>&output=embed` URL in a WebView
-  (`webview_flutter`) or iframe (`webview_flutter_web`).
-- **Desktop builds** (Linux, Windows, macOS) use the bundled OpenStreetMap
-  `flutter_map` layer, which also shows every member pin and place geofence on
-  one map.
+- **All platforms** (Android, iOS, web, Linux, macOS and Windows) use the
+  bundled OpenStreetMap `flutter_map` layer. Every member pin, movement badge
+  and place geofence circle is drawn on the same map.
+- **Map interaction** supports pinch/scroll zoom, two-finger rotation, floating
+  zoom buttons, a compass button that resets north, a "Show everyone" button
+  that fits all members and places, and live follow mode that smoothly tracks
+  the current user as they walk or drive. Any manual pan/zoom/rotation or
+  selecting another member stops follow mode.
 - **Place search and reverse geocoding** use
   [OpenStreetMap Nominatim](https://nominatim.org/), which needs no key. The app
   identifies itself with a User-Agent and contact email in `MapsConfig`
@@ -69,13 +71,10 @@ No API key or Google Cloud configuration is required.
 - **Directions** open `google.com/maps` deep links in the installed Google Maps
   app or the browser.
 
-Because the in-app map is an embed, it shows one centered location at a time
-(the selected member, or you after recentering). Multiple member pins and place
-geofence circles are only drawn on the desktop OpenStreetMap fallback.
-
-To use the full Google Maps SDK with live markers instead, add your own key and
-restore the `google_maps_flutter` integration (billing must be enabled on the
-Google Cloud project).
+The in-app map tiles come from the public OpenStreetMap tile server. For a
+production deployment with heavy traffic, use a tile provider that fits the
+[OSM tile usage policy](https://operations.osmfoundation.org/policies/tiles/)
+or a self-hosted tile server.
 
 ### Google sign-in setup
 

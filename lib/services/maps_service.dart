@@ -30,8 +30,8 @@ class PlaceSearchException implements Exception {
 
 /// Keyless map helpers used by the app.
 ///
-/// The map itself is rendered from Google Maps' public embed URL. Place
-/// addresses come from OpenStreetMap Nominatim, and the universal
+/// The map itself is rendered with OpenStreetMap tiles via `flutter_map`.
+/// Place addresses come from OpenStreetMap Nominatim, and the universal
 /// `google.com/maps` URLs open turn-by-turn directions in the user's installed
 /// Google Maps app or browser. None of these require an API key or billing.
 class MapsService {
